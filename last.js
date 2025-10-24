@@ -110,7 +110,7 @@ const App = () => {
               });
             },
             error: (xhr, status, error) => {
-12              console.error('Error checking site admin status:', error);
+              console.error('Error checking site admin status:', error);
               addNotification('Failed to check user permissions.', 'error');
               setIsLoadingUser(false);
               loadSurveys();
@@ -422,7 +422,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification, currentUserId }) 
       if (form.EndDate) {
         payload.EndDate = new Date(form.EndDate).toISOString();
       }
-      console.log('Saving payload:', payload);
+      console.log('Saving metadata for survey:', survey.Id, payload); // Debug: Log save payload
 
       await $.ajax({
         url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})`,
@@ -474,10 +474,14 @@ const EditModal = ({ survey, onClose, onSave, addNotification, currentUserId }) 
         addNotification('Survey metadata updated. Permissions not modified due to insufficient access.', 'warning');
       }
 
+      console.log('Metadata save successful for survey:', survey.Id); // Debug: Confirm save
       if (typeof onSave === 'function') {
-        onSave();
+        onSave(); // Trigger loadSurveys to refresh the list
+        // Optional: Uncomment the following line if loadSurveys doesn't fully refresh
+        // setTimeout(() => location.reload(), 500);
       } else {
-        console.warn('onSave is not a function; skipping survey refresh');
+        console.warn('onSave is not a function; falling back to location.reload');
+        setTimeout(() => location.reload(), 500); // Fallback refresh
       }
       onClose();
     } catch (error) {
