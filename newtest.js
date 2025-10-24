@@ -1,6 +1,16 @@
 // app.js
 const { useState, useEffect } = React;
 
+const getDigest = () => {
+  return $.ajax({
+    type: 'POST',
+    url: `${_spPageContextInfo.webAbsoluteUrl}/_api/contextinfo`,
+    headers: {
+      "Accept": "application/json; odata=verbose"
+    }
+  }).then(data => data.d.GetContextWebInformation.FormDigestValue);
+};
+
 const App = () => {
   const [surveys, setSurveys] = useState([]);
   const [userRole, setUserRole] = useState('');
@@ -17,6 +27,35 @@ const App = () => {
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== id));
     }, 5000);
+  };
+
+  const loadSurveys = (mode) => {
+    setIsLoadingSurveys(true);
+    const filter = mode === 'owned' && currentUser ? `&$filter=Owners/Id eq ${currentUser.get_id()}` : '';
+    $.ajax({
+      url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Id,Owners/Title,StartDate,EndDate,Status,Archive&$expand=Owners${filter}`,
+      headers: { "Accept": "application/json; odata=verbose" },
+      success: (data) => {
+        const surveys = data.d.results.map(s => ({
+          ...s,
+          Owners: { results: s.Owners ? s.Owners.results || [] : [] }
+        }));
+        Promise.all(surveys.map(s => 
+          $.ajax({
+            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Responses')/items?$filter=SurveyID eq ${s.Id}&$top=1&$inlinecount=allpages`,
+            headers: { "Accept": "application/json; odata=verbose" }
+          }).then(res => ({ ...s, responseCount: res.d.__count || 0 }))
+        )).then(updatedSurveys => {
+          setSurveys(updatedSurveys);
+          setIsLoadingSurveys(false);
+        });
+      },
+      error: (xhr, status, error) => {
+        console.error('Error fetching surveys:', error);
+        addNotification('Failed to load surveys.', 'error');
+        setIsLoadingSurveys(false);
+      }
+    });
   };
 
   useEffect(() => {
@@ -52,35 +91,6 @@ const App = () => {
       );
     });
   }, []);
-
-  const loadSurveys = (mode) => {
-    setIsLoadingSurveys(true);
-    const filter = mode === 'owned' && currentUser ? `&$filter=Owners/Id eq ${currentUser.get_id()}` : '';
-    $.ajax({
-      url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Id,Owners/Title,StartDate,EndDate,Status,Archive&$expand=Owners${filter}`,
-      headers: { "Accept": "application/json; odata=verbose" },
-      success: (data) => {
-        const surveys = data.d.results.map(s => ({
-          ...s,
-          Owners: { results: s.Owners ? s.Owners.results || [] : [] }
-        }));
-        Promise.all(surveys.map(s => 
-          $.ajax({
-            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Responses')/items?$filter=SurveyID eq ${s.Id}&$top=1&$inlinecount=allpages`,
-            headers: { "Accept": "application/json; odata=verbose" }
-          }).then(res => ({ ...s, responseCount: res.d.__count || 0 }))
-        )).then(updatedSurveys => {
-          setSurveys(updatedSurveys);
-          setIsLoadingSurveys(false);
-        });
-      },
-      error: (xhr, status, error) => {
-        console.error('Error fetching surveys:', error);
-        addNotification('Failed to load surveys.', 'error');
-        setIsLoadingSurveys(false);
-      }
-    });
-  };
 
   const applyFilters = (survey) => {
     const { status, search } = filters;
@@ -127,7 +137,14 @@ const App = () => {
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               {surveys.filter(applyFilters).map(survey => (
-                <SurveyCard key={survey.Id} survey={survey} userRole={userRole} currentUserId={currentUser?.get_id()} addNotification={addNotification} />
+                <SurveyCard 
+                  key={survey.Id} 
+                  survey={survey} 
+                  userRole={userRole} 
+                  currentUserId={currentUser?.get_id()} 
+                  addNotification={addNotification} 
+                  loadSurveys={loadSurveys} // Pass loadSurveys as prop
+                />
               ))}
             </div>
           )}
@@ -190,7 +207,7 @@ const SideNav = ({ filters, onFilterChange, isOpen, toggle, className }) => {
   );
 };
 
-const SurveyCard = ({ survey, userRole, currentUserId, addNotification }) => {
+const SurveyCard = ({ survey, userRole, currentUserId, addNotification, loadSurveys }) => {
   const [showQRModal, setShowQRModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const formUrl = `${_spPageContextInfo.webAbsoluteUrl}/SitePages/filler.aspx?surveyId=${survey.Id}`;
@@ -311,13 +328,12 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
     const debounce = setTimeout(() => {
       setIsLoadingUsers(true);
       $.ajax({
-        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/siteusers?$select=Id,Title&$filter=substringof('${searchTerm}',Title)&$top=10`,
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/siteusers?$select=Id,Title&$filter=substringof('${encodeURIComponent(searchTerm)}',Title)&$top=10`,
         headers: { "Accept": "application/json; odata=verbose" },
         success: (data) => {
           const users = data.d.results
-            .filter(u => u.Id && u.Title) // Ensure valid users
+            .filter(u => u.Id && u.Title)
             .map(u => ({ Id: u.Id, Title: u.Title }));
-          // Exclude already selected users
           const availableUsers = users.filter(u => !form.Owners.some(selected => selected.Id === u.Id));
           setSearchResults(availableUsers);
           setIsLoadingUsers(false);
@@ -345,75 +361,77 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
     setForm(prev => ({ ...prev, Owners: prev.Owners.filter(o => o.Id !== userId) }));
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     setIsSaving(true);
-    const payload = {
-      '__metadata': { 'type': 'SP.Data.SurveysListItem' },
-      OwnersId: { results: form.Owners.map(o => o.Id) },
-      Status: form.Status,
-      Archive: form.Archive
-    };
-    if (form.StartDate) {
-      payload.StartDate = new Date(form.StartDate).toISOString();
-    }
-    if (form.EndDate) {
-      payload.EndDate = new Date(form.EndDate).toISOString();
-    }
-    console.log('Saving payload:', payload); // Debug
-    $.ajax({
-      url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})`,
-      type: 'POST',
-      data: JSON.stringify(payload),
-      headers: {
-        "X-HTTP-Method": "MERGE",
-        "If-Match": "*",
-        "Accept": "application/json; odata=verbose",
-        "Content-Type": "application/json; odata=verbose"
-      },
-      success: () => {
-        // Break inheritance and set permissions
-        $.ajax({
-          url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id}/breakroleinheritance(copyRoleAssignments=false, clearSubscopes=true)`,
-          type: 'POST',
-          headers: { "Accept": "application/json; odata=verbose" },
-          success: () => {
-            if (form.Owners.length === 0) {
-              setIsSaving(false);
-              addNotification('Survey metadata updated successfully!');
-              onSave();
-              onClose();
-              return;
-            }
-            Promise.all(form.Owners.map(user => 
-              $.ajax({
-                url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id}/roleassignments/addroleassignment(principalid=${user.Id}, roledefid=1073741827)`,
-                type: 'POST',
-                headers: { "Accept": "application/json; odata=verbose" }
-              })
-            )).then(() => {
-              setIsSaving(false);
-              addNotification('Survey metadata updated successfully!');
-              onSave();
-              onClose();
-            }).catch(error => {
-              console.error('Error setting permissions:', error);
-              addNotification('Failed to update survey permissions.', 'error');
-              setIsSaving(false);
-            });
-          },
-          error: (xhr, status, error) => {
-            console.error('Error breaking role inheritance:', error);
-            addNotification('Failed to update survey permissions.', 'error');
-            setIsSaving(false);
-          }
-        });
-      },
-      error: (xhr, status, error) => {
-        console.error('Error updating survey:', error, xhr.responseText);
-        addNotification(`Failed to update survey metadata: ${xhr.responseText}`, 'error');
-        setIsSaving(false);
+    try {
+      // Fetch RequestDigest token
+      const digest = await getDigest();
+
+      const payload = {
+        '__metadata': { 'type': 'SP.Data.SurveysListItem' },
+        OwnersId: { results: form.Owners.map(o => o.Id) },
+        Status: form.Status,
+        Archive: form.Archive
+      };
+      if (form.StartDate) {
+        payload.StartDate = new Date(form.StartDate).toISOString();
       }
-    });
+      if (form.EndDate) {
+        payload.EndDate = new Date(form.EndDate).toISOString();
+      }
+      console.log('Saving payload:', payload);
+
+      // Update metadata
+      await $.ajax({
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})`,
+        type: 'POST',
+        data: JSON.stringify(payload),
+        headers: {
+          "X-HTTP-Method": "MERGE",
+          "If-Match": "*",
+          "Accept": "application/json; odata=verbose",
+          "Content-Type": "application/json; odata=verbose",
+          "X-RequestDigest": digest
+        }
+      });
+
+      // Break inheritance
+      await $.ajax({
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})/breakroleinheritance(copyRoleAssignments=false, clearSubscopes=true)`,
+        type: 'POST',
+        headers: {
+          "Accept": "application/json; odata=verbose",
+          "X-RequestDigest": digest
+        }
+      });
+
+      // Add permissions for owners
+      if (form.Owners.length > 0) {
+        await Promise.all(form.Owners.map(user => 
+          $.ajax({
+            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})/roleassignments/addroleassignment(principalid=${user.Id}, roledefid=1073741827)`,
+            type: 'POST',
+            headers: {
+              "Accept": "application/json; odata=verbose",
+              "X-RequestDigest": digest
+            }
+          })
+        ));
+      }
+
+      addNotification('Survey metadata updated successfully!');
+      if (typeof onSave === 'function') {
+        onSave(); // Calls loadSurveys(userRole)
+      } else {
+        console.warn('onSave is not a function; skipping survey refresh');
+      }
+      onClose();
+    } catch (error) {
+      console.error('Error updating survey:', error);
+      addNotification(`Failed to update survey metadata: ${error.responseText || error.message}`, 'error');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
