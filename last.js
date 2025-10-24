@@ -1,852 +1,590 @@
-$(document).ready(function() {
-    try {
-        let attempts = 0;
-        const maxAttempts = 50; // 5 seconds timeout
-        const checkSP = setInterval(() => {
-            if (typeof SP !== 'undefined' && SP.SOD) {
-                clearInterval(checkSP);
-                SP.SOD.executeOrDelayUntilScriptLoaded(initApp, 'sp.js');
-            } else if (attempts >= maxAttempts) {
-                clearInterval(checkSP);
-                console.error('SP.js failed to load.');
-                alert('SharePoint scripts failed to load. Refresh or check network.');
-            }
-            attempts++;
-        }, 100);
-    } catch (e) {
-        console.error('Page init failed:', e);
-        alert('Failed to initialize dashboard.');
-    }
-});
+// app.js
+const { useState, useEffect } = React;
 
-function initApp() {
-    if (!SP.ClientContext) {
-        console.error('SP.ClientContext not available');
-        alert('SharePoint context failed to load.');
-        return;
+const getDigest = () => {
+  return $.ajax({
+    type: 'POST',
+    url: `${_spPageContextInfo.webAbsoluteUrl}/_api/contextinfo`,
+    headers: {
+      "Accept": "application/json; odata=verbose"
     }
-    if (!React || !ReactDOM) {
-        console.error('React or ReactDOM not loaded');
-        alert('React scripts failed to load.');
-        return;
-    }
-    if (!window.QRious) {
-        console.error('QRious not loaded');
-        alert('QRious script failed to load.');
-        return;
-    }
+  }).then(data => data.d.GetContextWebInformation.FormDigestValue);
+};
 
-    const App = () => {
-        const [isManager, setIsManager] = React.useState(false);
-        const [surveys, setSurveys] = React.useState([]);
-        const [filteredSurveys, setFilteredSurveys] = React.useState([]);
-        const [statusFilters, setStatusFilters] = React.useState({
-            All: true,
-            draft: false,
-            published: false,
-            Upcoming: false,
-            Active: false,
-            Expired: false,
-            Archived: false
+const App = () => {
+  const [surveys, setSurveys] = useState([]);
+  const [userRole, setUserRole] = useState('');
+  const [currentUser, setCurrentUser] = useState(null);
+  const [filters, setFilters] = useState({ status: [], search: '' });
+  const [isSideNavOpen, setIsSideNavOpen] = useState(false);
+  const [isLoadingUser, setIsLoadingUser] = useState(true);
+  const [isLoadingSurveys, setIsLoadingSurveys] = useState(false);
+  const [notifications, setNotifications] = useState([]);
+
+  const addNotification = (message, type = 'success') => {
+    const id = Date.now();
+    setNotifications(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id));
+    }, 5000);
+  };
+
+  const loadSurveys = (mode) => {
+    setIsLoadingSurveys(true);
+    const filter = mode === 'owned' && currentUser ? `&$filter=Owners/Id eq ${currentUser.get_id()}` : '';
+    $.ajax({
+      url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Id,Owners/Title,StartDate,EndDate,Status,Archive&$expand=Owners${filter}`,
+      headers: { "Accept": "application/json; odata=verbose" },
+      success: (data) => {
+        const surveys = data.d.results.map(s => ({
+          ...s,
+          Owners: { results: s.Owners ? s.Owners.results || [] : [] }
+        }));
+        Promise.all(surveys.map(s => 
+          $.ajax({
+            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('SurveyResponses')/items?$filter=SurveyID eq ${s.Id}&$top=1&$inlinecount=allpages`,
+            headers: { "Accept": "application/json; odata=verbose" }
+          }).then(res => ({ ...s, responseCount: res.d.__count || 0 }))
+          .catch(error => {
+            console.error(`Error fetching responses for survey ${s.Id}:`, error);
+            addNotification(`Failed to load response count for survey "${s.Title}".`, 'error');
+            return { ...s, responseCount: 0 }; // Fallback to 0 responses
+          })
+        )).then(updatedSurveys => {
+          setSurveys(updatedSurveys);
+          setIsLoadingSurveys(false);
         });
-        const [searchQuery, setSearchQuery] = React.useState('');
-        const [totalSurveys, setTotalSurveys] = React.useState(0);
-        const [totalResponses, setTotalResponses] = React.useState(0);
-        const [selectedId, setSelectedId] = React.useState(null);
-        const [showDuplicateDialog, setShowDuplicateDialog] = React.useState(false);
-        const [showShareDialog, setShowShareDialog] = React.useState(false);
-        const [showEditMetadataDialog, setShowEditMetadataDialog] = React.useState(false);
-        const [selectedSurvey, setSelectedSurvey] = React.useState(null);
-        const [users, setUsers] = React.useState([]);
-        const [shareLink, setShareLink] = React.useState('');
-        const [sidebarOpen, setSidebarOpen] = React.useState(true);
-        const qrContainerRef = React.useRef(null);
+      },
+      error: (xhr, status, error) => {
+        console.error('Error fetching surveys:', error);
+        addNotification('Failed to load surveys. Ensure the "Surveys" list exists.', 'error');
+        setIsLoadingSurveys(false);
+      }
+    });
+  };
 
-        React.useEffect(() => {
-            loadUserInfo();
-            loadUserRole();
-            loadSiteUsers();
-            loadSurveysData();
-            fetchCounts();
-            // Handle sidebar responsiveness
-            const handleResize = () => setSidebarOpen(window.innerWidth >= 992);
-            window.addEventListener('resize', handleResize);
-            handleResize();
-            return () => window.removeEventListener('resize', handleResize);
-        }, []);
-
-        function loadUserInfo() {
-            try {
-                const context = SP.ClientContext.get_current();
-                const user = context.get_web().get_currentUser();
-                context.load(user);
-                context.executeQueryAsync(
-                    () => setUsername(user.get_title()),
-                    onFail('Failed to load user info')
-                );
-            } catch (e) {
-                console.error('User info error:', e);
-                setUsername('Error');
-            }
-        }
-
-        function loadUserRole() {
-            try {
-                const context = SP.ClientContext.get_current();
-                const user = context.get_web().get_currentUser();
-                const groups = user.get_groups();
-                context.load(groups);
-                context.executeQueryAsync(
-                    () => {
-                        let isAdmin = false;
-                        const enumerator = groups.getEnumerator();
-                        while (enumerator.moveNext()) {
-                            if (enumerator.get_current().get_title().includes('Owners')) {
-                                isAdmin = true;
-                                break;
-                            }
-                        }
-                        setIsManager(isAdmin);
-                    },
-                    onFail('Failed to load user role')
-                );
-            } catch (e) {
-                console.error('User role error:', e);
-                setIsManager(false);
-            }
-        }
-
-        function loadSiteUsers() {
-            try {
-                const context = SP.ClientContext.get_current();
-                const users = context.get_web().get_siteUsers();
-                context.load(users);
-                context.executeQueryAsync(
-                    () => {
-                        const userList = [];
-                        const enumerator = users.getEnumerator();
-                        while (enumerator.moveNext()) {
-                            const user = enumerator.get_current();
-                            if (user.get_userId()) {
-                                userList.push({
-                                    id: user.get_id(),
-                                    title: user.get_title(),
-                                    login: user.get_loginName()
-                                });
-                            }
-                        }
-                        setUsers(userList);
-                    },
-                    onFail('Failed to load site users')
-                );
-            } catch (e) {
-                console.error('Site users error:', e);
-                setUsers([]);
-            }
-        }
-
-        function loadSurveysData() {
-            try {
-                const context = SP.ClientContext.get_current();
-                const web = context.get_web();
-                const currentUser = web.get_currentUser();
-                const surveyList = web.get_lists().getByTitle('Surveys');
-                context.load(currentUser);
-                context.executeQueryAsync(
-                    () => {
-                        const query = new SP.CamlQuery();
-                        query.set_viewXml(`
-                            <View>
-                                <Query>
-                                    <Where>
-                                        <Contains>
-                                            <FieldRef Name="Owner"/>
-                                            <Value Type="UserMulti">${currentUser.get_title()}</Value>
-                                        </Contains>
-                                    </Where>
-                                </Query>
-                            </View>
-                        `);
-                        const items = surveyList.getItems(query);
-                        context.load(items, 'Include(Id, Title, Owner, Status, StartDate, EndDate, Archived, surveyData, Created)');
-                        context.executeQueryAsync(
-                            () => {
-                                console.log('Surveys loaded successfully');
-                                const surveyData = [];
-                                const enumerator = items.getEnumerator();
-                                while (enumerator.moveNext()) {
-                                    const item = enumerator.get_current();
-                                    const owners = item.get_item('Owner') || [];
-                                    const ownerNames = Array.isArray(owners)
-                                        ? owners.map(o => o.get_lookupValue()).join(', ')
-                                        : 'Unknown';
-                                    surveyData.push({
-                                        id: item.get_id(),
-                                        title: item.get_item('Title') || 'Untitled',
-                                        owners: ownerNames.split(', ').map(name => name.trim()).filter(name => name !== 'Unknown'),
-                                        ownerIds: Array.isArray(owners) ? owners.map(o => o.get_lookupId()) : [],
-                                        created: item.get_item('Created') ? new Date(item.get_item('Created')).toLocaleDateString() : 'Unknown',
-                                        status: item.get_item('Status') || 'draft',
-                                        startDate: item.get_item('StartDate') ? new Date(item.get_item('StartDate')).toLocaleDateString() : 'No Start Date',
-                                        endDate: item.get_item('EndDate') ? new Date(item.get_item('EndDate')).toLocaleDateString() : 'No End Date',
-                                        archived: item.get_item('Archived') || false,
-                                        responses: 0
-                                    });
-                                }
-                                setSurveys(surveyData);
-                                setFilteredSurveys(surveyData);
-                            },
-                            onFail('Failed to load surveys')
-                        );
-                    },
-                    onFail('Failed to load current user')
-                );
-            } catch (e) {
-                console.error('Surveys load error:', e);
-                setSurveys([]);
-                setFilteredSurveys([]);
-                alert('Error loading surveys.');
-            }
-        }
-
-        function fetchCounts() {
-            try {
-                const context = SP.ClientContext.get_current();
-                const responseList = context.get_web().get_lists().getByTitle('SurveyResponses');
-                const query = new SP.CamlQuery();
-                query.set_viewXml('<View><Query></Query></View>');
-                const items = responseList.getItems(query);
-                context.load(items, 'Include(SurveyID)');
-                context.executeQueryAsync(
-                    () => {
-                        console.log('Responses counted successfully');
-                        const responseCounts = {};
-                        const enumerator = items.getEnumerator();
-                        while (enumerator.moveNext()) {
-                            const surveyId = item.get_item('SurveyID');
-                            responseCounts[surveyId] = (responseCounts[surveyId] || 0) + 1;
-                        }
-                        const updatedSurveys = surveys.map(s => ({
-                            ...s,
-                            responses: responseCounts[s.id] || 0
-                        }));
-                        setSurveys(updatedSurveys);
-                        setFilteredSurveys(updatedSurveys);
-                        setTotalSurveys(updatedSurveys.length);
-                        setTotalResponses(Object.values(responseCounts).reduce((a, b) => a + b, 0));
-                    },
-                    onFail('Failed to fetch response counts')
-                );
-            } catch (e) {
-                console.error('Response counts error:', e);
-                setTotalSurveys(0);
-                setTotalResponses(0);
-            }
-        }
-
-        function filterSurveys() {
-            try {
-                const now = new Date();
-                const filtered = surveys.filter(s => {
-                    if (searchQuery && !s.title.toLowerCase().includes(searchQuery.toLowerCase())) return false;
-                    if (statusFilters.All) return s.archived !== true;
-                    if (statusFilters.draft && s.status === 'draft') return s.archived !== true;
-                    if (statusFilters.published && s.status === 'published') return s.archived !== true;
-                    if (statusFilters.Upcoming && s.startDate && new Date(s.startDate) > now) return s.archived !== true;
-                    if (statusFilters.Active && s.startDate && s.endDate &&
-                        new Date(s.startDate) <= now && new Date(s.endDate) >= now) return s.archived !== true;
-                    if (statusFilters.Expired && s.endDate && new Date(s.endDate) < now) return s.archived !== true;
-                    if (statusFilters.Archived && s.archived === true) return true;
-                    return false;
-                });
-                setFilteredSurveys(filtered);
-            } catch (e) {
-                console.error('Filter error:', e);
-                setFilteredSurveys(surveys);
-            }
-        }
-
-        React.useEffect(() => {
-            filterSurveys();
-        }, [statusFilters, searchQuery, surveys]);
-
-        function handleStatusFilterChange(filter) {
-            setStatusFilters(prev => ({
-                ...Object.fromEntries(Object.keys(prev).map(k => [k, false])),
-                [filter]: !prev[filter]
-            }));
-        }
-
-        function handleSearchChange(e) {
-            setSearchQuery(e.target.value);
-        }
-
-        function showShare(id, title) {
-            const url = `https://yourtenant.sharepoint.com/sites/yoursite/FormFill.aspx?surveyId=${id}`;
-            setShareLink(url);
-            setSelectedSurvey({ id, title });
-            setShowShareDialog(true);
-            setTimeout(() => {
-                if (qrContainerRef.current) {
-                    new QRious({
-                        element: qrContainerRef.current,
-                        value: url,
-                        size: 200
-                    });
+  useEffect(() => {
+    setIsLoadingUser(true);
+    SP.SOD.executeFunc('sp.js', 'SP.ClientContext', () => {
+      const context = SP.ClientContext.get_current();
+      const user = context.get_web().get_currentUser();
+      context.load(user);
+      context.executeQueryAsync(
+        () => {
+          setCurrentUser(user);
+          // Check if user is a site collection administrator
+          $.ajax({
+            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser?$select=IsSiteAdmin`,
+            headers: { "Accept": "application/json; odata=verbose" },
+            success: (userData) => {
+              const isSiteAdmin = userData.d.IsSiteAdmin;
+              // Check group membership for "Owners"
+              $.ajax({
+                url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser/groups`,
+                headers: { "Accept": "application/json; odata=verbose" },
+                success: (groupData) => {
+                  const isOwnerGroup = groupData.d.results.some(g => g.Title.includes('Owners'));
+                  const isOwner = isSiteAdmin || isOwnerGroup;
+                  setUserRole(isOwner ? 'owner' : 'member');
+                  setIsLoadingUser(false);
+                  loadSurveys(isOwner ? 'all' : 'owned');
+                },
+                error: (xhr, status, error) => {
+                  console.error('Error fetching groups:', error);
+                  addNotification('Failed to load user groups.', 'error');
+                  setIsLoadingUser(false);
+                  loadSurveys(isSiteAdmin ? 'all' : 'owned');
                 }
-            }, 0);
-        }
-
-        function downloadQR() {
-            const canvas = qrContainerRef.current;
-            if (canvas && selectedSurvey) {
-                const link = document.createElement('a');
-                link.href = canvas.toDataURL('image/png');
-                link.download = `${selectedSurvey.title.replace(/[^a-z0-9]/gi, '_')}-qr.png`;
-                link.click();
-            }
-        }
-
-        function copyURL() {
-            navigator.clipboard.writeText(shareLink).then(() => {
-                alert('Link copied to clipboard!');
-            }).catch(e => {
-                console.error('Copy error:', e);
-                alert('Failed to copy link.');
-            });
-        }
-
-        function showDuplicate(id) {
-            if (typeof id !== 'number' || id <= 0) {
-                console.error('Invalid ID for duplicate:', id);
-                alert('Invalid survey ID.');
-                return;
-            }
-            setSelectedId(id);
-            setShowDuplicateDialog(true);
-        }
-
-        function handleDuplicate() {
-            if (selectedId) {
-                duplicate(selectedId);
-                setShowDuplicateDialog(false);
-            }
-        }
-
-        function showEditMetadata(survey) {
-            setSelectedSurvey({
-                ...survey,
-                startDate: survey.startDate && survey.startDate !== 'No Start Date' ? new Date(survey.startDate).toISOString().split('T')[0] : '',
-                endDate: survey.endDate && survey.endDate !== 'No End Date' ? new Date(survey.endDate).toISOString().split('T')[0] : ''
-            });
-            setShowEditMetadataDialog(true);
-        }
-
-        function saveMetadata(updatedSurvey) {
-            try {
-                if (!updatedSurvey.title || updatedSurvey.title.trim() === '') {
-                    alert('Title is required.');
-                    return;
-                }
-                if (!updatedSurvey.ownerIds || updatedSurvey.ownerIds.length === 0) {
-                    alert('At least one owner is required.');
-                    return;
-                }
-                if (updatedSurvey.startDate && updatedSurvey.endDate &&
-                    new Date(updatedSurvey.startDate) > new Date(updatedSurvey.endDate)) {
-                    alert('End Date must be after Start Date.');
-                    return;
-                }
-                const context = SP.ClientContext.get_current();
-                const surveyList = context.get_web().get_lists().getByTitle('Surveys');
-                const item = surveyList.getItemById(updatedSurvey.id);
-                context.load(item);
-                context.executeQueryAsync(
-                    () => {
-                        item.set_item('Title', updatedSurvey.title);
-                        item.set_item('Status', updatedSurvey.status);
-                        item.set_item('StartDate', updatedSurvey.startDate ? new Date(updatedSurvey.startDate) : null);
-                        item.set_item('EndDate', updatedSurvey.endDate ? new Date(updatedSurvey.endDate) : null);
-                        item.set_item('Archived', updatedSurvey.archived);
-                        const ownerFieldValues = updatedSurvey.ownerIds.map(id => {
-                            const userFieldValue = new SP.FieldUserValue();
-                            userFieldValue.set_lookupId(id);
-                            return userFieldValue;
-                        });
-                        item.set_item('Owner', ownerFieldValues);
-                        item.update();
-                        const usersToSet = updatedSurvey.ownerIds.map(id => {
-                            const user = context.get_web().get_siteUsers().getById(id);
-                            context.load(user);
-                            return user;
-                        });
-                        context.executeQueryAsync(
-                            () => {
-                                setPermissions(item, usersToSet, () => {
-                                    console.log('Metadata saved for survey:', updatedSurvey.id);
-                                    alert('Metadata saved!');
-                                    loadSurveysData();
-                                    setShowEditMetadataDialog(false);
-                                });
-                            },
-                            onFail('Failed to load users for permissions')
-                        );
-                    },
-                    onFail('Failed to load survey for metadata update')
-                );
-            } catch (e) {
-                console.error('Metadata save error:', e);
-                alert('Error saving metadata.');
-            }
-        }
-
-        return React.createElement('div', { className: 'min-vh-100 bg-light' },
-            React.createElement('nav', { className: 'navbar navbar-dark bg-primary' },
-                React.createElement('div', { className: 'container-fluid' },
-                    React.createElement('div', { className: 'd-flex align-items-center' },
-                        React.createElement('button', {
-                            className: 'navbar-toggler me-2 d-lg-none',
-                            type: 'button',
-                            onClick: () => setSidebarOpen(!sidebarOpen),
-                            'aria-label': 'Toggle sidebar'
-                        }, React.createElement('span', { className: 'navbar-toggler-icon' })),
-                        React.createElement('span', { className: 'navbar-brand' }, 'Survey Dashboard')
-                    ),
-                    React.createElement('div', null,
-                        React.createElement('span', { className: 'text-white me-3' }, `Welcome, ${username}`),
-                        isManager && React.createElement('a', {
-                            href: '/sites/yoursite/Builder.aspx',
-                            className: 'btn btn-success',
-                            'aria-label': 'Create new survey'
-                        }, 'Create Survey')
-                    )
-                )
-            ),
-            React.createElement('div', { className: 'container-fluid' },
-                React.createElement('div', { className: 'row' },
-                    React.createElement('div', {
-                        className: `col-lg-3 bg-white border-end ${sidebarOpen ? '' : 'd-none d-lg-block'}`
-                    },
-                        React.createElement('div', { className: 'p-3' },
-                            React.createElement('h5', null, 'Filters'),
-                            Object.keys(statusFilters).map(filter => React.createElement('div', {
-                                key: filter,
-                                className: 'form-check'
-                            },
-                                React.createElement('input', {
-                                    type: 'checkbox',
-                                    className: 'form-check-input',
-                                    checked: statusFilters[filter],
-                                    onChange: () => handleStatusFilterChange(filter),
-                                    id: `filter-${filter}`,
-                                    'aria-label': `Filter by ${filter}`
-                                }),
-                                React.createElement('label', {
-                                    className: 'form-check-label',
-                                    htmlFor: `filter-${filter}`
-                                }, filter)
-                            )),
-                            React.createElement('input', {
-                                type: 'text',
-                                placeholder: 'Search surveys...',
-                                value: searchQuery,
-                                onChange: handleSearchChange,
-                                className: 'form-control mt-3',
-                                'aria-label': 'Search surveys'
-                            })
-                        )
-                    ),
-                    React.createElement('div', { className: 'col-lg-9 p-3' },
-                        React.createElement('div', { className: 'mb-3' },
-                            React.createElement('p', null, `Total Surveys: ${totalSurveys}`),
-                            React.createElement('p', null, `Total Responses: ${totalResponses}`)
-                        ),
-                        React.createElement('div', { className: 'row row-cols-1 row-cols-md-2 row-cols-lg-3 g-3' },
-                            filteredSurveys.length === 0 ?
-                                React.createElement('p', { className: 'text-muted' }, 'No surveys found.') :
-                                filteredSurveys.map(survey => React.createElement('div', {
-                                    key: survey.id,
-                                    className: 'col'
-                                },
-                                    React.createElement('div', {
-                                        className: 'card h-100',
-                                        'aria-label': `Survey: ${survey.title}`
-                                    },
-                                        React.createElement('div', { className: 'card-body' },
-                                            React.createElement('h5', { className: 'card-title' }, survey.title),
-                                            React.createElement('p', { className: 'card-text' },
-                                                React.createElement('strong', null, 'Owner(s): '),
-                                                survey.owners.length > 0 ? survey.owners.map((owner, idx) => 
-                                                    React.createElement('span', { key: idx, className: 'd-block' }, owner)
-                                                ) : 'Unknown'
-                                            ),
-                                            React.createElement('p', { className: 'card-text' }, `Created: ${survey.created}`),
-                                            React.createElement('p', { className: 'card-text' }, `Status: ${survey.status}`),
-                                            React.createElement('p', { className: 'card-text' }, `Start Date: ${survey.startDate}`),
-                                            React.createElement('p', { className: 'card-text' }, `End Date: ${survey.endDate}`),
-                                            React.createElement('p', { className: 'card-text' }, `Archived: ${survey.archived ? 'Yes' : 'No'}`),
-                                            React.createElement('p', { className: 'card-text' }, `Responses: ${survey.responses}`)
-                                        ),
-                                        React.createElement('div', { className: 'card-footer d-flex flex-wrap gap-2' },
-                                            React.createElement('a', {
-                                                href: `/sites/yoursite/Builder.aspx?surveyId=${survey.id}`,
-                                                target: '_blank',
-                                                rel: 'noopener noreferrer',
-                                                className: 'btn btn-primary btn-sm',
-                                                'aria-label': `Edit survey ${survey.title}`
-                                            }, React.createElement('i', { className: 'fas fa-pencil-alt me-1' }), 'Edit'),
-                                            React.createElement('a', {
-                                                href: `/sites/yoursite/FormFill.aspx?surveyId=${survey.id}`,
-                                                target: '_blank',
-                                                rel: 'noopener noreferrer',
-                                                className: 'btn btn-success btn-sm',
-                                                'aria-label': `Run survey ${survey.title}`
-                                            }, React.createElement('i', { className: 'fas fa-play me-1' }), 'Run'),
-                                            React.createElement('a', {
-                                                href: `/sites/yoursite/ResponsesView.aspx?surveyId=${survey.id}`,
-                                                target: '_blank',
-                                                rel: 'noopener noreferrer',
-                                                className: 'btn btn-info btn-sm',
-                                                'aria-label': `View responses for ${survey.title}`
-                                            }, React.createElement('i', { className: 'fas fa-chart-bar me-1' }), 'Report'),
-                                            React.createElement('button', {
-                                                className: 'btn btn-warning btn-sm',
-                                                onClick: () => showShare(survey.id, survey.title),
-                                                'aria-label': `Share survey ${survey.title}`
-                                            }, React.createElement('i', { className: 'fas fa-share-alt me-1' }), 'Share'),
-                                            React.createElement('button', {
-                                                className: 'btn btn-secondary btn-sm',
-                                                onClick: () => showEditMetadata(survey),
-                                                'aria-label': `Edit metadata for ${survey.title}`
-                                            }, React.createElement('i', { className: 'fas fa-cog me-1' }), 'Edit Metadata'),
-                                            React.createElement('button', {
-                                                className: 'btn btn-dark btn-sm',
-                                                onClick: () => showDuplicate(survey.id),
-                                                'aria-label': `Duplicate survey ${survey.title}`
-                                            }, React.createElement('i', { className: 'fas fa-copy me-1' }), 'Duplicate')
-                                        )
-                                    )
-                                ))
-                        )
-                    )
-                )
-            ),
-            showDuplicateDialog && React.createElement('div', {
-                className: 'modal fade show d-block',
-                tabIndex: '-1',
-                'aria-labelledby': 'duplicateModalLabel',
-                'aria-hidden': !showDuplicateDialog
+              });
             },
-                React.createElement('div', { className: 'modal-dialog modal-dialog-centered' },
-                    React.createElement('div', { className: 'modal-content' },
-                        React.createElement('div', { className: 'modal-header' },
-                            React.createElement('h5', { className: 'modal-title', id: 'duplicateModalLabel' }, 'Confirm Duplicate'),
-                            React.createElement('button', {
-                                type: 'button',
-                                className: 'btn-close',
-                                onClick: () => setShowDuplicateDialog(false),
-                                'aria-label': 'Close'
-                            })
-                        ),
-                        React.createElement('div', { className: 'modal-body' },
-                            React.createElement('p', null, 'Duplicate this survey?')
-                        ),
-                        React.createElement('div', { className: 'modal-footer' },
-                            React.createElement('button', {
-                                className: 'btn btn-secondary',
-                                onClick: () => setShowDuplicateDialog(false),
-                                'aria-label': 'Cancel'
-                            }, 'Cancel'),
-                            React.createElement('button', {
-                                className: 'btn btn-primary',
-                                onClick: handleDuplicate,
-                                'aria-label': 'Confirm duplicate'
-                            }, 'Duplicate')
-                        )
-                    )
-                )
-            ),
-            showShareDialog && React.createElement('div', {
-                className: 'modal fade show d-block',
-                tabIndex: '-1',
-                'aria-labelledby': 'shareModalLabel',
-                'aria-hidden': !showShareDialog
-            },
-                React.createElement('div', { className: 'modal-dialog modal-dialog-centered' },
-                    React.createElement('div', { className: 'modal-content' },
-                        React.createElement('div', { className: 'modal-header' },
-                            React.createElement('h5', { className: 'modal-title', id: 'shareModalLabel' }, 'Share Survey'),
-                            React.createElement('button', {
-                                type: 'button',
-                                className: 'btn-close',
-                                onClick: () => setShowShareDialog(false),
-                                'aria-label': 'Close'
-                            })
-                        ),
-                        React.createElement('div', { className: 'modal-body' },
-                            React.createElement('p', null, 'Share this link:'),
-                            React.createElement('input', {
-                                type: 'text',
-                                value: shareLink,
-                                readOnly: true,
-                                className: 'form-control mb-2',
-                                'aria-label': 'Survey share link'
-                            }),
-                            React.createElement('canvas', { ref: qrContainerRef, className: 'mb-2 d-block mx-auto' }),
-                            React.createElement('div', { className: 'd-flex gap-2' },
-                                React.createElement('button', {
-                                    className: 'btn btn-primary',
-                                    onClick: copyURL,
-                                    'aria-label': 'Copy share link'
-                                }, 'Copy URL'),
-                                React.createElement('button', {
-                                    className: 'btn btn-success',
-                                    onClick: downloadQR,
-                                    'aria-label': 'Download QR code'
-                                }, 'Download QR')
-                            )
-                        )
-                    )
-                )
-            ),
-            showEditMetadataDialog && React.createElement('div', {
-                className: 'modal fade show d-block',
-                tabIndex: '-1',
-                'aria-labelledby': 'editMetadataModalLabel',
-                'aria-hidden': !showEditMetadataDialog
-            },
-                React.createElement('div', { className: 'modal-dialog modal-dialog-centered' },
-                    React.createElement('div', { className: 'modal-content' },
-                        React.createElement('div', { className: 'modal-header' },
-                            React.createElement('h5', { className: 'modal-title', id: 'editMetadataModalLabel' }, 'Edit Metadata'),
-                            React.createElement('button', {
-                                type: 'button',
-                                className: 'btn-close',
-                                onClick: () => setShowEditMetadataDialog(false),
-                                'aria-label': 'Close'
-                            })
-                        ),
-                        React.createElement('div', { className: 'modal-body' },
-                            React.createElement('div', { className: 'mb-3' },
-                                React.createElement('label', { className: 'form-label' }, 'Title'),
-                                React.createElement('input', {
-                                    type: 'text',
-                                    value: selectedSurvey?.title || '',
-                                    onChange: e => setSelectedSurvey({ ...selectedSurvey, title: e.target.value }),
-                                    className: 'form-control',
-                                    'aria-label': 'Survey title'
-                                })
-                            ),
-                            React.createElement('div', { className: 'mb-3' },
-                                React.createElement('label', { className: 'form-label' }, 'Owner(s)'),
-                                React.createElement('select', {
-                                    multiple: true,
-                                    value: selectedSurvey?.ownerIds || [],
-                                    onChange: e => setSelectedSurvey({
-                                        ...selectedSurvey,
-                                        ownerIds: Array.from(e.target.selectedOptions).map(opt => parseInt(opt.value))
-                                    }),
-                                    className: 'form-select',
-                                    style: { height: '150px' },
-                                    'aria-label': 'Select survey owners'
-                                }, users.map(user => React.createElement('option', {
-                                    key: user.id,
-                                    value: user.id
-                                }, user.title)))
-                            ),
-                            React.createElement('div', { className: 'mb-3' },
-                                React.createElement('label', { className: 'form-label' }, 'Status'),
-                                React.createElement('select', {
-                                    value: selectedSurvey?.status || 'draft',
-                                    onChange: e => setSelectedSurvey({ ...selectedSurvey, status: e.target.value }),
-                                    className: 'form-select',
-                                    'aria-label': 'Survey status'
-                                }, ['draft', 'published'].map(status => React.createElement('option', {
-                                    key: status,
-                                    value: status
-                                }, status.charAt(0).toUpperCase() + status.slice(1))))
-                            ),
-                            React.createElement('div', { className: 'mb-3' },
-                                React.createElement('label', { className: 'form-label' }, 'Start Date'),
-                                React.createElement('input', {
-                                    type: 'date',
-                                    value: selectedSurvey?.startDate || '',
-                                    onChange: e => setSelectedSurvey({ ...selectedSurvey, startDate: e.target.value }),
-                                    className: 'form-control',
-                                    'aria-label': 'Survey start date'
-                                })
-                            ),
-                            React.createElement('div', { className: 'mb-3' },
-                                React.createElement('label', { className: 'form-label' }, 'End Date'),
-                                React.createElement('input', {
-                                    type: 'date',
-                                    value: selectedSurvey?.endDate || '',
-                                    onChange: e => setSelectedSurvey({ ...selectedSurvey, endDate: e.target.value }),
-                                    className: 'form-control',
-                                    'aria-label': 'Survey end date'
-                                })
-                            ),
-                            React.createElement('div', { className: 'form-check mb-3' },
-                                React.createElement('input', {
-                                    type: 'checkbox',
-                                    checked: selectedSurvey?.archived || false,
-                                    onChange: e => setSelectedSurvey({ ...selectedSurvey, archived: e.target.checked }),
-                                    className: 'form-check-input',
-                                    id: 'archived-checkbox',
-                                    'aria-label': 'Archive survey'
-                                }),
-                                React.createElement('label', { className: 'form-check-label', htmlFor: 'archived-checkbox' }, 'Archived')
-                            )
-                        ),
-                        React.createElement('div', { className: 'modal-footer' },
-                            React.createElement('button', {
-                                className: 'btn btn-secondary',
-                                onClick: () => setShowEditMetadataDialog(false),
-                                'aria-label': 'Cancel'
-                            }, 'Cancel'),
-                            React.createElement('button', {
-                                className: 'btn btn-primary',
-                                onClick: () => saveMetadata(selectedSurvey),
-                                'aria-label': 'Save metadata'
-                            }, 'Save')
-                        )
-                    )
-                )
-            )
-        );
-    };
+            error: (xhr, status, error) => {
+              console.error('Error checking site admin status:', error);
+              addNotification('Failed to check user permissions.', 'error');
+              setIsLoadingUser(false);
+              loadSurveys('owned');
+            }
+          });
+        },
+        (sender, args) => {
+          console.error('Error loading user:', args.get_message());
+          addNotification('Failed to load user information.', 'error');
+          setIsLoadingUser(false);
+          loadSurveys('owned');
+        }
+      );
+    });
+  }, []);
 
-    ReactDOM.render(React.createElement(App), document.getElementById('app'));
-}
+  const applyFilters = (survey) => {
+    const { status, search } = filters;
+    const matchesStatus = status.length === 0 || status.includes(survey.Status) || (survey.Archive && status.includes('Archive'));
+    const matchesSearch = !search || survey.Title.toLowerCase().includes(search.toLowerCase());
+    return matchesStatus && matchesSearch;
+  };
 
-function duplicate(id) {
-    try {
-        if (typeof id !== 'number' || id <= 0) throw new Error('Invalid ID');
-        console.log('Duplicate ID:', id);
-        const context = SP.ClientContext.get_current();
-        const surveyList = context.get_web().get_lists().getByTitle('Surveys');
-        const item = surveyList.getItemById(id);
-        context.load(item, 'Include(Id, Title, surveyData, Owner, Status, StartDate, EndDate, Archived)');
-        context.executeQueryAsync(
-            () => {
-                console.log('Item loaded:', item.get_fieldValues());
-                const surveyData = item.get_item('surveyData');
-                let json = surveyData ? JSON.parse(surveyData) : { title: 'Survey' };
-                json.title = `Copy of ${json.title || 'Survey'}`;
-                saveSurvey(json, null, success => {
-                    if (success) {
-                        console.log('Survey duplicated, ID:', id);
-                        alert('Survey duplicated!');
-                        location.reload();
-                    } else {
-                        console.error('Failed to save duplicated survey');
-                        alert('Error duplicating survey.');
-                    }
-                });
-            },
-            onFail('Failed to load survey for duplication')
-        );
-    } catch (e) {
-        console.error('Duplicate error:', e);
-        alert('Error duplicating survey.');
+  if (isLoadingUser) {
+    return (
+      <div className="flex items-center justify-center h-screen">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-blue-500"></div>
+      </div>
+    );
+  }
+
+  const filteredSurveys = surveys.filter(applyFilters);
+
+  return (
+    <div className="flex flex-col h-screen">
+      <div className="fixed top-4 right-4 z-50 space-y-2">
+        {notifications.map(n => (
+          <Notification
+            key={n.id}
+            message={n.message}
+            type={n.type}
+            onClose={() => setNotifications(prev => prev.filter(notification => notification.id !== n.id))}
+          />
+        ))}
+      </div>
+      <TopNav username={currentUser?.get_title()} onCreate={() => window.open('builder.aspx', '_blank')} />
+      <div className="flex flex-1">
+        <SideNav 
+          filters={filters} 
+          onFilterChange={setFilters} 
+          isOpen={isSideNavOpen} 
+          toggle={() => setIsSideNavOpen(!isSideNavOpen)} 
+          className={`lg:block ${isSideNavOpen ? 'block' : 'hidden'} md:w-1/4 bg-gray-100 p-4`} 
+        />
+        <div className="flex-1 p-4">
+          {isLoadingSurveys ? (
+            <div className="flex items-center justify-center h-full">
+              <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-blue-500 mr-4"></div>
+              <span>Loading surveys...</span>
+            </div>
+          ) : filteredSurveys.length === 0 ? (
+            <div className="flex items-center justify-center h-full">
+              <span className="text-gray-500">No surveys available</span>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {filteredSurveys.map(survey => (
+                <SurveyCard 
+                  key={survey.Id} 
+                  survey={survey} 
+                  userRole={userRole} 
+                  currentUserId={currentUser?.get_id()} 
+                  addNotification={addNotification} 
+                  loadSurveys={loadSurveys}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const Notification = ({ message, type, onClose }) => (
+  <div className={`p-4 rounded shadow flex justify-between items-center ${type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+    <span>{message}</span>
+    <button onClick={onClose} className="ml-4 text-lg font-bold">&times;</button>
+  </div>
+);
+
+const TopNav = ({ username, onCreate }) => (
+  <nav className="bg-blue-600 p-4 flex justify-between items-center text-white">
+    <div className="flex items-center">
+      <img src="/SiteAssets/logo.png" alt="Logo" className="h-8" />
+      <h1 className="ml-4">Survey Manager</h1>
+    </div>
+    <div>{username}</div>
+    <button onClick={onCreate} className="bg-green-500 px-4 py-2 rounded hover:bg-green-600">Create New Form</button>
+  </nav>
+);
+
+const SideNav = ({ filters, onFilterChange, isOpen, toggle, className }) => {
+  const handleStatusChange = (e) => {
+    const value = e.target.value;
+    const newStatus = e.target.checked 
+      ? [...filters.status, value]
+      : filters.status.filter(s => s !== value);
+    onFilterChange({ ...filters, status: newStatus });
+  };
+
+  return (
+    <div className={className}>
+      <button className="lg:hidden mb-4 p-2 bg-gray-200 rounded hover:bg-gray-300" onClick={toggle}>
+        {isOpen ? 'Close Menu' : 'Open Menu'}
+      </button>
+      <input 
+        type="text" 
+        placeholder="Search surveys..." 
+        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+        onChange={(e) => onFilterChange({ ...filters, search: e.target.value })}
+      />
+      <div className="space-y-2">
+        <label className="flex items-center">
+          <input type="checkbox" value="Publish" onChange={handleStatusChange} className="mr-2" /> Published
+        </label>
+        <label className="flex items-center">
+          <input type="checkbox" value="Draft" onChange={handleStatusChange} className="mr-2" /> Draft
+        </label>
+        <label className="flex items-center">
+          <input type="checkbox" value="Archive" onChange={handleStatusChange} className="mr-2" /> Archived
+        </label>
+      </div>
+    </div>
+  );
+};
+
+const SurveyCard = ({ survey, userRole, currentUserId, addNotification, loadSurveys }) => {
+  const [showQRModal, setShowQRModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const formUrl = `${_spPageContextInfo.webAbsoluteUrl}/SitePages/filler.aspx?surveyId=${survey.Id}`;
+
+  const isOwner = userRole === 'owner' || survey.Owners.results.some(o => o.Id === currentUserId);
+
+  return (
+    <div className="border p-4 rounded shadow bg-white hover:shadow-lg transition">
+      <h2 className="text-lg font-bold">{survey.Title}</h2>
+      <p>Responses: {survey.responseCount}</p>
+      <p>Status: {survey.Status} {survey.Archive ? '(Archived)' : ''}</p>
+      <div className="flex flex-wrap gap-2 mt-2">
+        {isOwner && (
+          <>
+            <button 
+              className="bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600" 
+              onClick={() => window.open(`builder.aspx?surveyId=${survey.Id}`, '_blank')}
+            >
+              Edit Form
+            </button>
+            <button 
+              className="bg-yellow-500 text-white px-3 py-1 rounded hover:bg-yellow-600" 
+              onClick={() => window.open(`report.aspx?surveyId=${survey.Id}`, '_blank')}
+            >
+              View Report
+            </button>
+            <button 
+              className="bg-purple-500 text-white px-3 py-1 rounded hover:bg-purple-600" 
+              onClick={() => setShowQRModal(true)}
+            >
+              QR Code
+            </button>
+            <button 
+              className="bg-gray-500 text-white px-3 py-1 rounded hover:bg-gray-600" 
+              onClick={() => setShowEditModal(true)}
+            >
+              Edit Metadata
+            </button>
+          </>
+        )}
+        <button 
+          className="bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600" 
+          onClick={() => window.open(`filler.aspx?surveyId=${survey.Id}`, '_blank')}
+        >
+          Fill Form
+        </button>
+      </div>
+      {showQRModal && <QRModal url={formUrl} onClose={() => setShowQRModal(false)} addNotification={addNotification} />}
+      {showEditModal && <EditModal survey={survey} onClose={() => setShowEditModal(false)} onSave={() => loadSurveys(userRole)} addNotification={addNotification} />}
+    </div>
+  );
+};
+
+const QRModal = ({ url, onClose, addNotification }) => {
+  const qrRef = React.useRef(null);
+  useEffect(() => {
+    new QRious({ element: qrRef.current, value: url, size: 200 });
+  }, [url]);
+
+  const downloadQR = () => {
+    const link = document.createElement('a');
+    link.href = qrRef.current.toDataURL();
+    link.download = 'qrcode.png';
+    link.click();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white p-6 rounded-lg shadow-xl">
+        <canvas ref={qrRef} className="mx-auto"></canvas>
+        <div className="mt-4 flex gap-2 justify-center">
+          <button 
+            className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600" 
+            onClick={downloadQR}
+          >
+            Download
+          </button>
+          <button 
+            className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600" 
+            onClick={() => navigator.clipboard.writeText(url).then(() => addNotification('URL copied to clipboard!'))}
+          >
+            Copy URL
+          </button>
+          <button 
+            className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" 
+            onClick={onClose}
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const EditModal = ({ survey, onClose, onSave, addNotification }) => {
+  const [form, setForm] = useState({
+    Owners: Array.isArray(survey.Owners?.results) ? survey.Owners.results.map(o => ({ Id: o.Id, Title: o.Title })) : [],
+    StartDate: survey.StartDate ? new Date(survey.StartDate).toISOString().split('T')[0] : '',
+    EndDate: survey.EndDate ? new Date(survey.EndDate).toISOString().split('T')[0] : '',
+    Status: survey.Status || 'Draft',
+    Archive: survey.Archive || false
+  });
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [showDropdown, setShowDropdown] = useState(false);
+
+  // Search users with debounce using User Information List
+  useEffect(() => {
+    if (!searchTerm) {
+      setSearchResults([]);
+      setShowDropdown(false);
+      return;
     }
-}
 
-function saveSurvey(json, id, callback) {
+    const debounce = setTimeout(() => {
+      setIsLoadingUsers(true);
+      $.ajax({
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/siteusers?$select=Id,Title&$filter=substringof('${encodeURIComponent(searchTerm)}',Title)&$top=10`,
+        headers: { "Accept": "application/json; odata=verbose" },
+        success: (data) => {
+          const users = data.d.results
+            .filter(u => u.Id && u.Title)
+            .map(u => ({ Id: u.Id, Title: u.Title }));
+          const availableUsers = users.filter(u => !form.Owners.some(selected => selected.Id === u.Id));
+          setSearchResults(availableUsers);
+          setIsLoadingUsers(false);
+          setShowDropdown(true);
+        },
+        error: (xhr, status, error) => {
+          console.error('Error searching users:', error);
+          addNotification('Failed to search users.', 'error');
+          setIsLoadingUsers(false);
+          setShowDropdown(false);
+        }
+      });
+    }, 300);
+
+    return () => clearTimeout(debounce);
+  }, [searchTerm, form.Owners]);
+
+  const handleUserSelect = (user) => {
+    setForm(prev => ({ ...prev, Owners: [...prev.Owners, user] }));
+    setSearchTerm('');
+    setShowDropdown(false);
+  };
+
+  const handleUserRemove = (userId) => {
+    setForm(prev => ({ ...prev, Owners: prev.Owners.filter(o => o.Id !== userId) }));
+  };
+
+  const handleSave = async () => {
+    setIsSaving(true);
     try {
-        if (!json || typeof json !== 'object') throw new Error('Invalid JSON');
-        console.log('Saving survey, ID:', id || 'New');
-        const context = SP.ClientContext.get_current();
-        const web = context.get_web();
-        const user = web.get_currentUser();
-        const surveyList = web.get_lists().getByTitle('Surveys');
-        context.load(user);
-        context.executeQueryAsync(
-            () => {
-                let item;
-                if (id) {
-                    item = surveyList.getItemById(id);
-                    item.set_item('surveyData', JSON.stringify(json));
-                    item.set_item('Title', json.title || 'Updated Survey');
-                } else {
-                    const createInfo = new SP.ListItemCreationInformation();
-                    item = surveyList.addItem(createInfo);
-                    item.set_item('Title', json.title || 'New Survey');
-                    item.set_item('surveyData', JSON.stringify(json));
-                    const userFieldValue = new SP.FieldUserValue();
-                    userFieldValue.set_lookupId(user.get_id());
-                    item.set_item('Owner', [userFieldValue]);
-                    item.set_item('Status', 'draft');
-                    item.set_item('Archived', false);
-                }
-                item.update();
-                context.load(item);
-                context.executeQueryAsync(
-                    () => {
-                        if (!id) {
-                            setPermissions(item, [user], () => {
-                                console.log('Survey created, ID:', item.get_id());
-                                callback(true);
-                            });
-                        } else {
-                            console.log('Survey updated, ID:', id);
-                            callback(true);
-                        }
-                    },
-                    onFail('Failed to save survey')
-                );
-            },
-            onFail('Failed to load user')
-        );
-    } catch (e) {
-        console.error('Save error:', e);
-        alert('Error saving survey.');
-        callback(false);
-    }
-}
+      // Fetch RequestDigest token
+      const digest = await getDigest();
 
-function setPermissions(item, users, callback) {
-    try {
-        console.log('Setting permissions for survey:', item.get_id());
-        const context = SP.ClientContext.get_current();
-        const web = context.get_web();
-        users.forEach(user => context.load(user));
-        item.breakRoleInheritance(true, false);
-        const roleAssignments = item.get_roleAssignments();
-        context.load(roleAssignments);
-        context.executeQueryAsync(
-            () => {
-                const assignments = roleAssignments.get_data();
-                const toRemove = assignments.filter(a => a.get_member().get_principalType() === SP.PrincipalType.user);
-                toRemove.forEach(a => a.deleteObject());
-                const roleDefs = web.get_roleDefinitions();
-                const contribute = roleDefs.getByName('Contribute');
-                users.forEach(user => {
-                    const newAssignment = new SP.RoleAssignment(user);
-                    newAssignment.addRoleDefinition(contribute);
-                    roleAssignments.add(newAssignment);
-                });
-                item.update();
-                context.executeQueryAsync(
-                    () => {
-                        console.log('Permissions set for users:', users.map(u => u.get_title()));
-                        callback();
-                    },
-                    onFail('Failed to set permissions')
-                );
-            },
-            onFail('Failed to load role assignments')
-        );
-    } catch (e) {
-        console.error('Permissions error:', e);
-        alert('Error setting permissions.');
-        callback();
-    }
-}
+      const payload = {
+        '__metadata': { 'type': 'SP.Data.SurveysListItem' },
+        OwnersId: { results: form.Owners.map(o => o.Id) },
+        Status: form.Status,
+        Archive: form.Archive
+      };
+      if (form.StartDate) {
+        payload.StartDate = new Date(form.StartDate).toISOString();
+      }
+      if (form.EndDate) {
+        payload.EndDate = new Date(form.EndDate).toISOString();
+      }
+      console.log('Saving payload:', payload);
 
-function onFail(message) {
-    return (sender, args) => {
-        console.error(message, args.get_message());
-        alert(`${message}: ${args.get_message()}`);
-    };
-}
+      // Update metadata
+      await $.ajax({
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})`,
+        type: 'POST',
+        data: JSON.stringify(payload),
+        headers: {
+          "X-HTTP-Method": "MERGE",
+          "If-Match": "*",
+          "Accept": "application/json; odata=verbose",
+          "Content-Type": "application/json; odata=verbose",
+          "X-RequestDigest": digest
+        }
+      });
+
+      // Break inheritance
+      await $.ajax({
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})/breakroleinheritance(copyRoleAssignments=false, clearSubscopes=true)`,
+        type: 'POST',
+        headers: {
+          "Accept": "application/json; odata=verbose",
+          "X-RequestDigest": digest
+        }
+      });
+
+      // Add permissions for owners
+      if (form.Owners.length > 0) {
+        await Promise.all(form.Owners.map(user => 
+          $.ajax({
+            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})/roleassignments/addroleassignment(principalid=${user.Id}, roledefid=1073741827)`,
+            type: 'POST',
+            headers: {
+              "Accept": "application/json; odata=verbose",
+              "X-RequestDigest": digest
+            }
+          })
+        ));
+      }
+
+      addNotification('Survey metadata updated successfully!');
+      if (typeof onSave === 'function') {
+        onSave();
+      } else {
+        console.warn('onSave is not a function; skipping survey refresh');
+      }
+      onClose();
+    } catch (error) {
+      console.error('Error updating survey:', error);
+      addNotification(`Failed to update survey metadata: ${error.responseText || error.message}`, 'error');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md max-h-96 overflow-y-auto">
+        <h2 className="text-lg font-bold mb-4">Edit Metadata</h2>
+        <div className="space-y-4">
+          <div>
+            <label className="block mb-1">Owners</label>
+            <div className="relative">
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Search for users by name..."
+                className="w-full p-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              {isLoadingUsers && (
+                <div className="absolute top-2 right-2">
+                  <div className="animate-spin rounded-full h-5 w-5 border-t-2 border-blue-500"></div>
+                </div>
+              )}
+              {showDropdown && searchResults.length > 0 && (
+                <ul className="absolute z-10 w-full bg-white border rounded mt-1 max-h-48 overflow-y-auto shadow-lg">
+                  {searchResults.map(user => (
+                    <li
+                      key={user.Id}
+                      onClick={() => handleUserSelect(user)}
+                      className="p-2 hover:bg-gray-100 cursor-pointer border-b last:border-b-0"
+                    >
+                      {user.Title}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {form.Owners.length === 0 ? (
+                <p className="text-gray-500 text-sm">No owners selected</p>
+              ) : (
+                form.Owners.map(user => (
+                  <div
+                    key={user.Id}
+                    className="flex items-center bg-blue-100 text-blue-800 px-2 py-1 rounded-full text-sm"
+                  >
+                    <span>{user.Title}</span>
+                    <button
+                      onClick={() => handleUserRemove(user.Id)}
+                      className="ml-2 text-red-600 hover:text-red-800 font-bold"
+                    >
+                      &times;
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+          <div>
+            <label className="block mb-1">Start Date</label>
+            <input
+              type="date"
+              value={form.StartDate}
+              onChange={(e) => setForm(prev => ({ ...prev, StartDate: e.target.value }))}
+              className="w-full p-2 border rounded"
+            />
+          </div>
+          <div>
+            <label className="block mb-1">End Date</label>
+            <input
+              type="date"
+              value={form.EndDate}
+              onChange={(e) => setForm(prev => ({ ...prev, EndDate: e.target.value }))}
+              className="w-full p-2 border rounded"
+            />
+          </div>
+          <div>
+            <label className="block mb-1">Status</label>
+            <select
+              value={form.Status}
+              onChange={(e) => setForm(prev => ({ ...prev, Status: e.target.value }))}
+              className="w-full p-2 border rounded"
+            >
+              <option value="Publish">Publish</option>
+              <option value="Draft">Draft</option>
+            </select>
+          </div>
+          <div>
+            <label className="flex items-center">
+              <input
+                type="checkbox"
+                checked={form.Archive}
+                onChange={(e) => setForm(prev => ({ ...prev, Archive: e.target.checked }))}
+                className="mr-2"
+              />
+              Archive
+            </label>
+          </div>
+        </div>
+        <div className="mt-6 flex gap-2 justify-end">
+          <button 
+            className={`bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 flex items-center ${isSaving ? 'opacity-50 cursor-not-allowed' : ''}`} 
+            onClick={handleSave}
+            disabled={isSaving}
+          >
+            {isSaving ? (
+              <>
+                <div className="animate-spin rounded-full h-5 w-5 border-t-2 border-white mr-2"></div>
+                Saving...
+              </>
+            ) : (
+              'Save'
+            )}
+          </button>
+          <button 
+            className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" 
+            onClick={onClose}
+            disabled={isSaving}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+ReactDOM.render(<App />, document.getElementById('root'));
