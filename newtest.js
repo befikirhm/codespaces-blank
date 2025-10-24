@@ -67,19 +67,39 @@ const App = () => {
       context.executeQueryAsync(
         () => {
           setCurrentUser(user);
+          const userId = user.get_id();
+          // Check for Full Control permission
           $.ajax({
-            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser/groups`,
+            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/getuserbyid(${userId})/getusereffectivepermissions`,
             headers: { "Accept": "application/json; odata=verbose" },
-            success: (data) => {
-              const isOwner = data.d.results.some(g => g.Title.includes('Owners'));
-              setUserRole(isOwner ? 'owner' : 'member');
-              setIsLoadingUser(false);
-              loadSurveys(isOwner ? 'all' : 'owned');
+            success: (permData) => {
+              // Full Control permission mask in SharePoint 2016
+              const fullControlMask = 0x7FFFFFFF; // High: 1, Low: 2147483647
+              const hasFullControl = (permData.d.GetUserEffectivePermissions.Low & fullControlMask) > 0;
+              // Check group membership for "Owners"
+              $.ajax({
+                url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser/groups`,
+                headers: { "Accept": "application/json; odata=verbose" },
+                success: (groupData) => {
+                  const isOwnerGroup = groupData.d.results.some(g => g.Title.includes('Owners'));
+                  const isOwner = hasFullControl || isOwnerGroup;
+                  setUserRole(isOwner ? 'owner' : 'member');
+                  setIsLoadingUser(false);
+                  loadSurveys(isOwner ? 'all' : 'owned');
+                },
+                error: (xhr, status, error) => {
+                  console.error('Error fetching groups:', error);
+                  addNotification('Failed to load user groups.', 'error');
+                  setIsLoadingUser(false);
+                  loadSurveys('owned'); // Fallback to owned surveys
+                }
+              });
             },
             error: (xhr, status, error) => {
-              console.error('Error fetching groups:', error);
-              addNotification('Failed to load user information.', 'error');
+              console.error('Error checking permissions:', error);
+              addNotification('Failed to check user permissions.', 'error');
               setIsLoadingUser(false);
+              loadSurveys('owned'); // Fallback to owned surveys
             }
           });
         },
@@ -87,6 +107,7 @@ const App = () => {
           console.error('Error loading user:', args.get_message());
           addNotification('Failed to load user information.', 'error');
           setIsLoadingUser(false);
+          loadSurveys('owned'); // Fallback to owned surveys
         }
       );
     });
@@ -106,6 +127,8 @@ const App = () => {
       </div>
     );
   }
+
+  const filteredSurveys = surveys.filter(applyFilters);
 
   return (
     <div className="flex flex-col h-screen">
@@ -134,16 +157,20 @@ const App = () => {
               <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-blue-500 mr-4"></div>
               <span>Loading surveys...</span>
             </div>
+          ) : filteredSurveys.length === 0 ? (
+            <div className="flex items-center justify-center h-full">
+              <span className="text-gray-500">No surveys available</span>
+            </div>
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {surveys.filter(applyFilters).map(survey => (
+              {filteredSurveys.map(survey => (
                 <SurveyCard 
                   key={survey.Id} 
                   survey={survey} 
                   userRole={userRole} 
                   currentUserId={currentUser?.get_id()} 
                   addNotification={addNotification} 
-                  loadSurveys={loadSurveys} // Pass loadSurveys as prop
+                  loadSurveys={loadSurveys}
                 />
               ))}
             </div>
@@ -421,7 +448,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
 
       addNotification('Survey metadata updated successfully!');
       if (typeof onSave === 'function') {
-        onSave(); // Calls loadSurveys(userRole)
+        onSave();
       } else {
         console.warn('onSave is not a function; skipping survey refresh');
       }
