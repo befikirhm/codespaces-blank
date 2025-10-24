@@ -34,11 +34,11 @@ const App = () => {
     }, 5000);
   };
 
-  const loadSurveys = (mode) => {
+  const loadSurveys = () => {
     setIsLoadingSurveys(true);
-    const filter = mode === 'owned' && currentUser ? `&$filter=Owners/Id eq ${currentUser.get_id()}` : '';
+    const filter = currentUser ? `&$filter=Owners/Id eq ${currentUser.get_id()} and Author/Id eq ${currentUser.get_id()}` : '';
     $.ajax({
-      url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Id,Owners/Title,StartDate,EndDate,Status,Archive&$expand=Owners${filter}`,
+      url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Id,Owners/Title,Author/Id,StartDate,EndDate,Status,Archive&$expand=Owners,Author${filter}`,
       headers: { "Accept": "application/json; odata=verbose" },
       xhrFields: { withCredentials: true },
       success: (data) => {
@@ -52,14 +52,17 @@ const App = () => {
             headers: { "Accept": "application/json; odata=verbose" },
             xhrFields: { withCredentials: true },
           }).then(res => ({ ...s, responseCount: res.d.__count || 0 }))
-          .catch(error => {
-            console.error(`Error fetching responses for survey ${s.Id}:`, error);
-            addNotification(`Failed to load response count for survey "${s.Title}".`, 'error');
-            return { ...s, responseCount: 0 };
-          })
+            .catch(error => {
+              console.error(`Error fetching responses for survey ${s.Id}:`, error);
+              addNotification(`Failed to load response count for survey "${s.Title}".`, 'error');
+              return { ...s, responseCount: 0 };
+            })
         )).then(updatedSurveys => {
           setSurveys(updatedSurveys);
           setIsLoadingSurveys(false);
+          if (updatedSurveys.length === 0) {
+            addNotification('No surveys found where you are the creator and owner.', 'warning');
+          }
         });
       },
       error: (xhr, status, error) => {
@@ -91,16 +94,15 @@ const App = () => {
                 xhrFields: { withCredentials: true },
                 success: (groupData) => {
                   const isOwnerGroup = groupData.d.results.some(g => g.Title.includes('Owners'));
-                  const isOwner = isSiteAdmin || isOwnerGroup;
-                  setUserRole(isOwner ? 'owner' : 'member');
+                  setUserRole(isSiteAdmin || isOwnerGroup ? 'owner' : 'member');
                   setIsLoadingUser(false);
-                  loadSurveys(isOwner ? 'all' : 'owned');
+                  loadSurveys();
                 },
                 error: (xhr, status, error) => {
                   console.error('Error fetching groups:', error);
                   addNotification('Failed to load user groups.', 'error');
                   setIsLoadingUser(false);
-                  loadSurveys(isSiteAdmin ? 'all' : 'owned');
+                  loadSurveys();
                 }
               });
             },
@@ -108,7 +110,7 @@ const App = () => {
               console.error('Error checking site admin status:', error);
               addNotification('Failed to check user permissions.', 'error');
               setIsLoadingUser(false);
-              loadSurveys('owned');
+              loadSurveys();
             }
           });
         },
@@ -116,7 +118,7 @@ const App = () => {
           console.error('Error loading user:', args.get_message());
           addNotification('Failed to load user information.', 'error');
           setIsLoadingUser(false);
-          loadSurveys('owned');
+          loadSurveys();
         }
       );
     });
@@ -191,7 +193,7 @@ const App = () => {
 };
 
 const Notification = ({ message, type, onClose }) => (
-  <div className={`p-4 rounded shadow flex justify-between items-center ${type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+  <div className={`p-4 rounded shadow flex justify-between items-center ${type === 'success' ? 'bg-green-100 text-green-800' : type === 'warning' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
     <span>{message}</span>
     <button onClick={onClose} className="ml-4 text-lg font-bold">&times;</button>
   </div>
@@ -248,42 +250,36 @@ const SurveyCard = ({ survey, userRole, currentUserId, addNotification, loadSurv
   const [showEditModal, setShowEditModal] = useState(false);
   const formUrl = `${_spPageContextInfo.webAbsoluteUrl}/SitePages/filler.aspx?surveyId=${survey.Id}`;
 
-  const isOwner = userRole === 'owner' || survey.Owners.results.some(o => o.Id === currentUserId);
-
   return (
     <div className="border p-4 rounded shadow bg-white hover:shadow-lg transition">
       <h2 className="text-lg font-bold">{survey.Title}</h2>
       <p>Responses: {survey.responseCount}</p>
       <p>Status: {survey.Status} {survey.Archive ? '(Archived)' : ''}</p>
       <div className="flex flex-wrap gap-2 mt-2">
-        {isOwner && (
-          <>
-            <button 
-              className="bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600" 
-              onClick={() => window.open(`builder.aspx?surveyId=${survey.Id}`, '_blank')}
-            >
-              Edit Form
-            </button>
-            <button 
-              className="bg-yellow-500 text-white px-3 py-1 rounded hover:bg-yellow-600" 
-              onClick={() => window.open(`report.aspx?surveyId=${survey.Id}`, '_blank')}
-            >
-              View Report
-            </button>
-            <button 
-              className="bg-purple-500 text-white px-3 py-1 rounded hover:bg-purple-600" 
-              onClick={() => setShowQRModal(true)}
-            >
-              QR Code
-            </button>
-            <button 
-              className="bg-gray-500 text-white px-3 py-1 rounded hover:bg-gray-600" 
-              onClick={() => setShowEditModal(true)}
-            >
-              Edit Metadata
-            </button>
-          </>
-        )}
+        <button 
+          className="bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600" 
+          onClick={() => window.open(`builder.aspx?surveyId=${survey.Id}`, '_blank')}
+        >
+          Edit Form
+        </button>
+        <button 
+          className="bg-yellow-500 text-white px-3 py-1 rounded hover:bg-yellow-600" 
+          onClick={() => window.open(`report.aspx?surveyId=${survey.Id}`, '_blank')}
+        >
+          View Report
+        </button>
+        <button 
+          className="bg-purple-500 text-white px-3 py-1 rounded hover:bg-purple-600" 
+          onClick={() => setShowQRModal(true)}
+        >
+          QR Code
+        </button>
+        <button 
+          className="bg-gray-500 text-white px-3 py-1 rounded hover:bg-gray-600" 
+          onClick={() => setShowEditModal(true)}
+        >
+          Edit Metadata
+        </button>
         <button 
           className="bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600" 
           onClick={() => window.open(`filler.aspx?surveyId=${survey.Id}`, '_blank')}
@@ -292,7 +288,7 @@ const SurveyCard = ({ survey, userRole, currentUserId, addNotification, loadSurv
         </button>
       </div>
       {showQRModal && <QRModal url={formUrl} onClose={() => setShowQRModal(false)} addNotification={addNotification} />}
-      {showEditModal && <EditModal survey={survey} onClose={() => setShowEditModal(false)} onSave={() => loadSurveys(userRole)} addNotification={addNotification} />}
+      {showEditModal && <EditModal survey={survey} onClose={() => setShowEditModal(false)} onSave={() => loadSurveys()} addNotification={addNotification} />}
     </div>
   );
 };
@@ -400,7 +396,6 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      // Fetch a fresh RequestDigest token
       const digest = await getDigest();
 
       const payload = {
@@ -417,7 +412,6 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
       }
       console.log('Saving payload:', payload);
 
-      // Update metadata
       await $.ajax({
         url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})`,
         type: 'POST',
@@ -432,16 +426,14 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
         xhrFields: { withCredentials: true }
       });
 
-      // Check if user has Manage Permissions
       const permissions = await $.ajax({
         url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})/effectiveBasePermissions`,
         headers: { "Accept": "application/json; odata=verbose" },
         xhrFields: { withCredentials: true }
       });
-      const hasManagePermissions = permissions.d.EffectiveBasePermissions.High & 0x00000080; // Manage Permissions bit
+      const hasManagePermissions = permissions.d.EffectiveBasePermissions.High & 0x00000080;
 
       if (hasManagePermissions) {
-        // Break inheritance
         await $.ajax({
           url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})/breakroleinheritance(copyRoleAssignments=false, clearSubscopes=true)`,
           type: 'POST',
@@ -452,7 +444,6 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
           xhrFields: { withCredentials: true }
         });
 
-        // Add permissions for owners
         if (form.Owners.length > 0) {
           await Promise.all(form.Owners.map(user => 
             $.ajax({
@@ -481,7 +472,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
       console.error('Error updating survey:', error);
       let errorMessage = error.responseText || error.message;
       if (error.status === 403) {
-        errorMessage = 'Access denied. Ensure you have Manage Lists or Full Control permissions to modify permissions.';
+        errorMessage = 'Access denied. Ensure you have Manage Permissions on this survey.';
       } else if (errorMessage.includes('Invalid Form Digest')) {
         errorMessage = 'Invalid or expired request digest token. Please try again.';
       }
