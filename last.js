@@ -42,6 +42,7 @@ const App = () => {
       headers: { "Accept": "application/json; odata=verbose" },
       xhrFields: { withCredentials: true },
       success: (data) => {
+        console.log('Surveys API response:', data.d.results); // Debug: Log API response
         const surveys = data.d.results.map(s => ({
           ...s,
           Owners: { results: s.Owners ? s.Owners.results || [] : [] }
@@ -58,6 +59,7 @@ const App = () => {
               return { ...s, responseCount: 0 };
             })
         )).then(updatedSurveys => {
+          console.log('Updated surveys:', updatedSurveys); // Debug: Log final surveys
           setSurveys(updatedSurveys);
           setIsLoadingSurveys(false);
           if (updatedSurveys.length === 0) {
@@ -83,7 +85,7 @@ const App = () => {
         () => {
           setCurrentUser(user);
           $.ajax({
-            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser?$select=IsSiteAdmin`,
+            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser?$select=Id,IsSiteAdmin`,
             headers: { "Accept": "application/json; odata=verbose" },
             xhrFields: { withCredentials: true },
             success: (userData) => {
@@ -288,7 +290,7 @@ const SurveyCard = ({ survey, userRole, currentUserId, addNotification, loadSurv
         </button>
       </div>
       {showQRModal && <QRModal url={formUrl} onClose={() => setShowQRModal(false)} addNotification={addNotification} />}
-      {showEditModal && <EditModal survey={survey} onClose={() => setShowEditModal(false)} onSave={() => loadSurveys()} addNotification={addNotification} />}
+      {showEditModal && <EditModal survey={survey} onClose={() => setShowEditModal(false)} onSave={() => loadSurveys()} addNotification={addNotification} currentUserId={currentUserId} />}
     </div>
   );
 };
@@ -335,7 +337,7 @@ const QRModal = ({ url, onClose, addNotification }) => {
   );
 };
 
-const EditModal = ({ survey, onClose, onSave, addNotification }) => {
+const EditModal = ({ survey, onClose, onSave, addNotification, currentUserId }) => {
   const [form, setForm] = useState({
     Owners: Array.isArray(survey.Owners?.results) ? survey.Owners.results.map(o => ({ Id: o.Id, Title: o.Title })) : [],
     StartDate: survey.StartDate ? new Date(survey.StartDate).toISOString().split('T')[0] : '',
@@ -390,12 +392,21 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
   };
 
   const handleUserRemove = (userId) => {
+    if (userId === currentUserId) {
+      addNotification('You cannot remove yourself as an owner.', 'error');
+      return;
+    }
     setForm(prev => ({ ...prev, Owners: prev.Owners.filter(o => o.Id !== userId) }));
   };
 
   const handleSave = async () => {
     setIsSaving(true);
     try {
+      // Ensure current user remains in Owners
+      if (!form.Owners.some(o => o.Id === currentUserId)) {
+        throw new Error('You must remain an owner of the survey.');
+      }
+
       const digest = await getDigest();
 
       const payload = {
@@ -470,7 +481,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
       onClose();
     } catch (error) {
       console.error('Error updating survey:', error);
-      let errorMessage = error.responseText || error.message;
+      let errorMessage = error.message || error.responseText || 'Unknown error';
       if (error.status === 403) {
         errorMessage = 'Access denied. Ensure you have Manage Permissions on this survey.';
       } else if (errorMessage.includes('Invalid Form Digest')) {
@@ -529,8 +540,9 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
                     <button
                       onClick={() => handleUserRemove(user.Id)}
                       className="ml-2 text-red-600 hover:text-red-800 font-bold"
+                      disabled={user.Id === currentUserId}
                     >
-                      &times;
+                      {user.Id === currentUserId ? '' : '&times;'}
                     </button>
                   </div>
                 ))
