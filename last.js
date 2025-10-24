@@ -34,46 +34,51 @@ const App = () => {
     }, 5000);
   };
 
-  const loadSurveys = () => {
+  const loadSurveys = async (retryCount = 0, maxRetries = 3, delay = 1000) => {
+    if (!currentUser) return;
     setIsLoadingSurveys(true);
-    const userId = currentUser ? currentUser.get_id() : null;
+    const userId = currentUser.get_id();
     const filter = userId ? `&$filter=Owners/Id eq ${userId} and Author/Id eq ${userId}` : '';
-    $.ajax({
-      url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Id,Owners/Title,Author/Id,StartDate,EndDate,Status,Archive&$expand=Owners,Author${filter}`,
-      headers: { "Accept": "application/json; odata=verbose" },
-      xhrFields: { withCredentials: true },
-      success: (data) => {
-        console.log('Surveys API response:', data.d.results); // Debug: Log API response
-        const surveys = data.d.results.map(s => ({
-          ...s,
-          Owners: { results: s.Owners ? s.Owners.results || [] : [] }
-        }));
-        Promise.all(surveys.map(s => 
-          $.ajax({
-            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('SurveyResponses')/items?$filter=SurveyID eq ${s.Id}&$top=1&$inlinecount=allpages`,
-            headers: { "Accept": "application/json; odata=verbose" },
-            xhrFields: { withCredentials: true },
-          }).then(res => ({ ...s, responseCount: res.d.__count || 0 }))
-            .catch(error => {
-              console.error(`Error fetching responses for survey ${s.Id}:`, error);
-              addNotification(`Failed to load response count for survey "${s.Title}".`, 'error');
-              return { ...s, responseCount: 0 };
-            })
-        )).then(updatedSurveys => {
-          console.log('Updated surveys:', updatedSurveys); // Debug: Log final surveys
-          setSurveys(updatedSurveys);
-          setIsLoadingSurveys(false);
-          if (updatedSurveys.length === 0) {
-            addNotification('No surveys found where you are the creator and owner.', 'warning');
-          }
-        });
-      },
-      error: (xhr, status, error) => {
-        console.error('Error fetching surveys:', error);
-        addNotification('Failed to load surveys. Ensure the "Surveys" list exists.', 'error');
+    try {
+      const response = await $.ajax({
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Id,Owners/Title,Author/Id,StartDate,EndDate,Status,Archive,surveyJson&$expand=Owners,Author${filter}`,
+        headers: { "Accept": "application/json; odata=verbose" },
+        xhrFields: { withCredentials: true }
+      });
+      console.log('Surveys API response (attempt ' + (retryCount + 1) + '):', response.d.results); // Debug
+      const surveys = response.d.results.map(s => ({
+        ...s,
+        Owners: { results: s.Owners ? s.Owners.results || [] : [] },
+        Description: s.surveyJson ? (JSON.parse(s.surveyJson)?.description || 'No description available') : 'No description available'
+      }));
+      const updatedSurveys = await Promise.all(surveys.map(s => 
+        $.ajax({
+          url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('SurveyResponses')/items?$filter=SurveyID eq ${s.Id}&$top=1&$inlinecount=allpages`,
+          headers: { "Accept": "application/json; odata=verbose" },
+          xhrFields: { withCredentials: true }
+        }).then(res => ({ ...s, responseCount: res.d.__count || 0 }))
+          .catch(error => {
+            console.error(`Error fetching responses for survey ${s.Id}:`, error);
+            addNotification(`Failed to load response count for survey "${s.Title}".`, 'error');
+            return { ...s, responseCount: 0 };
+          })
+      ));
+      console.log('Updated surveys:', updatedSurveys); // Debug
+      setSurveys(updatedSurveys);
+      setIsLoadingSurveys(false);
+      if (updatedSurveys.length === 0) {
+        addNotification('No surveys found where you are the creator and owner.', 'warning');
+      }
+    } catch (error) {
+      console.error('Error fetching surveys (attempt ' + (retryCount + 1) + '):', error);
+      if (retryCount < maxRetries - 1) {
+        console.log('Retrying loadSurveys in ' + delay + 'ms...');
+        setTimeout(() => loadSurveys(retryCount + 1, maxRetries, delay * 2), delay);
+      } else {
+        addNotification('Failed to load surveys after ' + maxRetries + ' attempts. Ensure the "Surveys" list exists.', 'error');
         setIsLoadingSurveys(false);
       }
-    });
+    }
   };
 
   useEffect(() => {
@@ -156,7 +161,7 @@ const App = () => {
           />
         ))}
       </div>
-      <TopNav username={currentUser?.get_title()} onCreate={() => window.open('builder.aspx', '_blank')} />
+      <TopNav username={currentUser?.get_title()} />
       <div className="flex flex-1">
         <SideNav 
           filters={filters} 
@@ -166,6 +171,15 @@ const App = () => {
           className={`lg:block ${isSideNavOpen ? 'block' : 'hidden'} md:w-1/4 bg-gray-100 p-4`} 
         />
         <div className="flex-1 p-4">
+          <div className="mb-4">
+            <button 
+              onClick={() => window.open('builder.aspx', '_blank')} 
+              className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
+              aria-label="Create new survey form"
+            >
+              Create New Form
+            </button>
+          </div>
           {isLoadingSurveys ? (
             <div className="flex items-center justify-center h-full">
               <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-blue-500 mr-4"></div>
@@ -198,18 +212,17 @@ const App = () => {
 const Notification = ({ message, type, onClose }) => (
   <div className={`p-4 rounded shadow flex justify-between items-center ${type === 'success' ? 'bg-green-100 text-green-800' : type === 'warning' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
     <span>{message}</span>
-    <button onClick={onClose} className="ml-4 text-lg font-bold">&times;</button>
+    <button onClick={onClose} className="ml-4 text-lg font-bold" aria-label="Close notification">&times;</button>
   </div>
 );
 
-const TopNav = ({ username, onCreate }) => (
+const TopNav = ({ username }) => (
   <nav className="bg-blue-600 p-4 flex justify-between items-center text-white">
     <div className="flex items-center">
       <img src="/SiteAssets/logo.png" alt="Logo" className="h-8" />
       <h1 className="ml-4">Survey Manager</h1>
     </div>
-    <div>{username}</div>
-    <button onClick={onCreate} className="bg-green-500 px-4 py-2 rounded hover:bg-green-600">Create New Form</button>
+    <div className="text-right">{username}</div>
   </nav>
 );
 
@@ -224,7 +237,7 @@ const SideNav = ({ filters, onFilterChange, isOpen, toggle, className }) => {
 
   return (
     <div className={className}>
-      <button className="lg:hidden mb-4 p-2 bg-gray-200 rounded hover:bg-gray-300" onClick={toggle}>
+      <button className="lg:hidden mb-4 p-2 bg-gray-200 rounded hover:bg-gray-300" onClick={toggle} aria-label={isOpen ? 'Close menu' : 'Open menu'}>
         {isOpen ? 'Close Menu' : 'Open Menu'}
       </button>
       <input 
@@ -232,16 +245,17 @@ const SideNav = ({ filters, onFilterChange, isOpen, toggle, className }) => {
         placeholder="Search surveys..." 
         className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
         onChange={(e) => onFilterChange({ ...filters, search: e.target.value })}
+        aria-label="Search surveys"
       />
       <div className="space-y-2">
         <label className="flex items-center">
-          <input type="checkbox" value="Publish" onChange={handleStatusChange} className="mr-2" /> Published
+          <input type="checkbox" value="Publish" onChange={handleStatusChange} className="mr-2" aria-label="Filter by Published status" /> Published
         </label>
         <label className="flex items-center">
-          <input type="checkbox" value="Draft" onChange={handleStatusChange} className="mr-2" /> Draft
+          <input type="checkbox" value="Draft" onChange={handleStatusChange} className="mr-2" aria-label="Filter by Draft status" /> Draft
         </label>
         <label className="flex items-center">
-          <input type="checkbox" value="Archive" onChange={handleStatusChange} className="mr-2" /> Archived
+          <input type="checkbox" value="Archive" onChange={handleStatusChange} className="mr-2" aria-label="Filter by Archived status" /> Archived
         </label>
       </div>
     </div>
@@ -253,45 +267,78 @@ const SurveyCard = ({ survey, userRole, currentUserId, addNotification, loadSurv
   const [showEditModal, setShowEditModal] = useState(false);
   const formUrl = `${_spPageContextInfo.webAbsoluteUrl}/SitePages/filler.aspx?surveyId=${survey.Id}`;
 
+  const formatDate = (date) => date ? new Date(date).toLocaleDateString() : 'Not set';
+
   return (
-    <div className="border p-4 rounded shadow bg-white hover:shadow-lg transition">
-      <h2 className="text-lg font-bold">{survey.Title}</h2>
-      <p>Responses: {survey.responseCount}</p>
-      <p>Status: {survey.Status} {survey.Archive ? '(Archived)' : ''}</p>
-      <div className="flex flex-wrap gap-2 mt-2">
+    <div className="border p-4 rounded shadow bg-white hover:shadow-lg transition flex flex-col">
+      <div className="flex-1">
+        <h2 className="text-lg font-bold">{survey.Title}</h2>
+        <p className="text-gray-600">{survey.Description}</p>
+        <p>Responses: {survey.responseCount}</p>
+        <p>Status: {survey.Status} {survey.Archive ? '(Archived)' : ''}</p>
+        <p>
+          Dates: {formatDate(survey.StartDate)} - {formatDate(survey.EndDate)}
+        </p>
+      </div>
+      <div className="mt-4 flex flex-wrap gap-2 border-t pt-2">
         <button 
-          className="bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600" 
+          className="flex items-center bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600" 
           onClick={() => window.open(`builder.aspx?surveyId=${survey.Id}`, '_blank')}
+          title="Edit the survey form"
+          aria-label="Edit survey form"
         >
+          <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+          </svg>
           Edit Form
         </button>
         <button 
-          className="bg-yellow-500 text-white px-3 py-1 rounded hover:bg-yellow-600" 
+          className="flex items-center bg-yellow-500 text-white px-3 py-1 rounded hover:bg-yellow-600" 
           onClick={() => window.open(`report.aspx?surveyId=${survey.Id}`, '_blank')}
+          title="View survey report"
+          aria-label="View survey report"
         >
+          <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 17v-2m0-2v-2m0-2V7m6 10v-2m0-2v-2m0-2V7m-6-2h6m4 0H5a2 2 0 00-2 2v12a2 2 0 002 2h14a2 2 0 002-2V7a2 2 0 00-2-2z"></path>
+          </svg>
           View Report
         </button>
         <button 
-          className="bg-purple-500 text-white px-3 py-1 rounded hover:bg-purple-600" 
+          className="flex items-center bg-purple-500 text-white px-3 py-1 rounded hover:bg-purple-600" 
           onClick={() => setShowQRModal(true)}
+          title="Generate QR code"
+          aria-label="Generate QR code"
         >
+          <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m-2 4h2M6 12H4m2 4v4m0-11v3m-2 4h2m7-7h3m-3 3h3m-3 3h3"></path>
+          </svg>
           QR Code
         </button>
         <button 
-          className="bg-gray-500 text-white px-3 py-1 rounded hover:bg-gray-600" 
+          className="flex items-center bg-gray-500 text-white px-3 py-1 rounded hover:bg-gray-600" 
           onClick={() => setShowEditModal(true)}
+          title="Edit survey metadata"
+          aria-label="Edit survey metadata"
         >
+          <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path>
+          </svg>
           Edit Metadata
         </button>
         <button 
-          className="bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600" 
+          className="flex items-center bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600" 
           onClick={() => window.open(`filler.aspx?surveyId=${survey.Id}`, '_blank')}
+          title="Fill out the survey"
+          aria-label="Fill out survey"
         >
+          <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4M7.835 4.697a3.5 3.5 0 105.33 4.606 3.5 3.5 0 01-5.33-4.606zM12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707"></path>
+          </svg>
           Fill Form
         </button>
       </div>
       {showQRModal && <QRModal url={formUrl} onClose={() => setShowQRModal(false)} addNotification={addNotification} />}
-      {showEditModal && <EditModal survey={survey} onClose={() => setShowEditModal(false)} onSave={() => loadSurveys()} addNotification={addNotification} currentUserId={currentUserId} />}
+      {showEditModal && <EditModal survey={survey} onClose={() => setShowEditModal(false)} addNotification={addNotification} currentUserId={currentUserId} />}
     </div>
   );
 };
@@ -311,24 +358,35 @@ const QRModal = ({ url, onClose, addNotification }) => {
 
   return (
     <div className="fixed inset-0 flex items-center justify-center z-50">
-      <div className="bg-white p-6 rounded-lg shadow-xl">
-        <canvas ref={qrRef} className="mx-auto"></canvas>
-        <div className="mt-4 flex gap-2 justify-center">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md">
+        <div className="flex justify-between items-center p-4 border-b">
+          <h2 className="text-lg font-bold">QR Code</h2>
+          <button onClick={onClose} className="text-gray-600 hover:text-gray-800" aria-label="Close QR code modal">
+            &times;
+          </button>
+        </div>
+        <div className="p-6">
+          <canvas ref={qrRef} className="mx-auto"></canvas>
+        </div>
+        <div className="flex gap-2 justify-end p-4 border-t">
           <button 
             className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600" 
             onClick={downloadQR}
+            aria-label="Download QR code"
           >
             Download
           </button>
           <button 
             className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600" 
             onClick={() => navigator.clipboard.writeText(url).then(() => addNotification('URL copied to clipboard!'))}
+            aria-label="Copy QR code URL"
           >
             Copy URL
           </button>
           <button 
             className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" 
             onClick={onClose}
+            aria-label="Close modal"
           >
             Close
           </button>
@@ -338,7 +396,7 @@ const QRModal = ({ url, onClose, addNotification }) => {
   );
 };
 
-const EditModal = ({ survey, onClose, onSave, addNotification, currentUserId }) => {
+const EditModal = ({ survey, onClose, addNotification, currentUserId }) => {
   const [form, setForm] = useState({
     Owners: Array.isArray(survey.Owners?.results) ? survey.Owners.results.map(o => ({ Id: o.Id, Title: o.Title })) : [],
     StartDate: survey.StartDate ? new Date(survey.StartDate).toISOString().split('T')[0] : '',
@@ -422,7 +480,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification, currentUserId }) 
       if (form.EndDate) {
         payload.EndDate = new Date(form.EndDate).toISOString();
       }
-      console.log('Saving metadata for survey:', survey.Id, payload); // Debug: Log save payload
+      console.log('Saving metadata for survey:', survey.Id, payload); // Debug
 
       await $.ajax({
         url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})`,
@@ -474,15 +532,9 @@ const EditModal = ({ survey, onClose, onSave, addNotification, currentUserId }) 
         addNotification('Survey metadata updated. Permissions not modified due to insufficient access.', 'warning');
       }
 
-      console.log('Metadata save successful for survey:', survey.Id); // Debug: Confirm save
-      if (typeof onSave === 'function') {
-        onSave(); // Trigger loadSurveys to refresh the list
-        // Optional: Uncomment the following line if loadSurveys doesn't fully refresh
-        // setTimeout(() => location.reload(), 500);
-      } else {
-        console.warn('onSave is not a function; falling back to location.reload');
-        setTimeout(() => location.reload(), 500); // Fallback refresh
-      }
+      console.log('Metadata save successful for survey:', survey.Id); // Debug
+      // Force page reload to ensure SharePoint updates are reflected
+      setTimeout(() => location.reload(), 500);
       onClose();
     } catch (error) {
       console.error('Error updating survey:', error);
@@ -500,106 +552,122 @@ const EditModal = ({ survey, onClose, onSave, addNotification, currentUserId }) 
 
   return (
     <div className="fixed inset-0 flex items-center justify-center z-50">
-      <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md max-h-96 overflow-y-auto">
-        <h2 className="text-lg font-bold mb-4">Edit Metadata</h2>
-        <div className="space-y-4">
-          <div>
-            <label className="block mb-1">Owners</label>
-            <div className="relative">
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search for users by name..."
-                className="w-full p-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              {isLoadingUsers && (
-                <div className="absolute top-2 right-2">
-                  <div className="animate-spin rounded-full h-5 w-5 border-t-2 border-blue-500"></div>
-                </div>
-              )}
-              {showDropdown && searchResults.length > 0 && (
-                <ul className="absolute z-10 w-full bg-white border rounded mt-1 max-h-48 overflow-y-auto shadow-lg">
-                  {searchResults.map(user => (
-                    <li
-                      key={user.Id}
-                      onClick={() => handleUserSelect(user)}
-                      className="p-2 hover:bg-gray-100 cursor-pointer border-b last:border-b-0"
-                    >
-                      {user.Title}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {form.Owners.length === 0 ? (
-                <p className="text-gray-500 text-sm">No owners selected</p>
-              ) : (
-                form.Owners.map(user => (
-                  <div
-                    key={user.Id}
-                    className="flex items-center bg-blue-100 text-blue-800 px-2 py-1 rounded-full text-sm"
-                  >
-                    <span>{user.Title}</span>
-                    <button
-                      onClick={() => handleUserRemove(user.Id)}
-                      className="ml-2 text-red-600 hover:text-red-800 font-bold"
-                      disabled={user.Id === currentUserId}
-                    >
-                      {user.Id === currentUserId ? '' : '&times;'}
-                    </button>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md">
+        <div className="flex justify-between items-center p-4 border-b">
+          <h2 className="text-lg font-bold">Edit Metadata</h2>
+          <button onClick={onClose} className="text-gray-600 hover:text-gray-800" aria-label="Close metadata modal">
+            &times;
+          </button>
+        </div>
+        <div className="p-6 max-h-96 overflow-y-auto">
+          <div className="space-y-4">
+            <div>
+              <label className="block mb-1">Owners</label>
+              <div className="relative">
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="Search for users by name..."
+                  className="w-full p-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  aria-label="Search for users"
+                />
+                {isLoadingUsers && (
+                  <div className="absolute top-2 right-2">
+                    <div className="animate-spin rounded-full h-5 w-5 border-t-2 border-blue-500"></div>
                   </div>
-                ))
-              )}
+                )}
+                {showDropdown && searchResults.length > 0 && (
+                  <ul className="absolute z-10 w-full bg-white border rounded mt-1 max-h-48 overflow-y-auto shadow-lg">
+                    {searchResults.map(user => (
+                      <li
+                        key={user.Id}
+                        onClick={() => handleUserSelect(user)}
+                        className="p-2 hover:bg-gray-100 cursor-pointer border-b last:border-b-0"
+                        role="option"
+                        aria-selected="false"
+                      >
+                        {user.Title}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {form.Owners.length === 0 ? (
+                  <p className="text-gray-500 text-sm">No owners selected</p>
+                ) : (
+                  form.Owners.map(user => (
+                    <div
+                      key={user.Id}
+                      className="flex items-center bg-blue-100 text-blue-800 px-2 py-1 rounded-full text-sm"
+                    >
+                      <span>{user.Title}</span>
+                      <button
+                        onClick={() => handleUserRemove(user.Id)}
+                        className="ml-2 text-red-600 hover:text-red-800 font-bold"
+                        disabled={user.Id === currentUserId}
+                        aria-label={`Remove ${user.Title} from owners`}
+                      >
+                        {user.Id === currentUserId ? '' : '&times;'}
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
-          </div>
-          <div>
-            <label className="block mb-1">Start Date</label>
-            <input
-              type="date"
-              value={form.StartDate}
-              onChange={(e) => setForm(prev => ({ ...prev, StartDate: e.target.value }))}
-              className="w-full p-2 border rounded"
-            />
-          </div>
-          <div>
-            <label className="block mb-1">End Date</label>
-            <input
-              type="date"
-              value={form.EndDate}
-              onChange={(e) => setForm(prev => ({ ...prev, EndDate: e.target.value }))}
-              className="w-full p-2 border rounded"
-            />
-          </div>
-          <div>
-            <label className="block mb-1">Status</label>
-            <select
-              value={form.Status}
-              onChange={(e) => setForm(prev => ({ ...prev, Status: e.target.value }))}
-              className="w-full p-2 border rounded"
-            >
-              <option value="Publish">Publish</option>
-              <option value="Draft">Draft</option>
-            </select>
-          </div>
-          <div>
-            <label className="flex items-center">
+            <div>
+              <label className="block mb-1">Start Date</label>
               <input
-                type="checkbox"
-                checked={form.Archive}
-                onChange={(e) => setForm(prev => ({ ...prev, Archive: e.target.checked }))}
-                className="mr-2"
+                type="date"
+                value={form.StartDate}
+                onChange={(e) => setForm(prev => ({ ...prev, StartDate: e.target.value }))}
+                className="w-full p-2 border rounded"
+                aria-label="Start date"
               />
-              Archive
-            </label>
+            </div>
+            <div>
+              <label className="block mb-1">End Date</label>
+              <input
+                type="date"
+                value={form.EndDate}
+                onChange={(e) => setForm(prev => ({ ...prev, EndDate: e.target.value }))}
+                className="w-full p-2 border rounded"
+                aria-label="End date"
+              />
+            </div>
+            <div>
+              <label className="block mb-1">Status</label>
+              <select
+                value={form.Status}
+                onChange={(e) => setForm(prev => ({ ...prev, Status: e.target.value }))}
+                className="w-full p-2 border rounded"
+                aria-label="Survey status"
+              >
+                <option value="Publish">Publish</option>
+                <option value="Draft">Draft</option>
+              </select>
+            </div>
+            <div>
+              <label className="flex items-center">
+                <input
+                  type="checkbox"
+                  checked={form.Archive}
+                  onChange={(e) => setForm(prev => ({ ...prev, Archive: e.target.checked }))}
+                  className="mr-2"
+                  aria-label="Archive survey"
+                />
+                Archive
+              </label>
+            </div>
           </div>
         </div>
-        <div className="mt-6 flex gap-2 justify-end">
+        <div className="flex gap-2 justify-end p-4 border-t">
           <button 
             className={`bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 flex items-center ${isSaving ? 'opacity-50 cursor-not-allowed' : ''}`} 
             onClick={handleSave}
             disabled={isSaving}
+            aria-label="Save metadata"
           >
             {isSaving ? (
               <>
@@ -614,6 +682,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification, currentUserId }) 
             className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" 
             onClick={onClose}
             disabled={isSaving}
+            aria-label="Cancel metadata edit"
           >
             Cancel
           </button>
