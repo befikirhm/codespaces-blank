@@ -36,7 +36,8 @@ const App = () => {
 
   const loadSurveys = () => {
     setIsLoadingSurveys(true);
-    const filter = currentUser ? `&$filter=Owners/Id eq ${currentUser.get_id()} and Author/Id eq ${currentUser.get_id()}` : '';
+    const userId = currentUser ? currentUser.get_id() : null;
+    const filter = userId ? `&$filter=Owners/Id eq ${userId} and Author/Id eq ${userId}` : '';
     $.ajax({
       url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Id,Owners/Title,Author/Id,StartDate,EndDate,Status,Archive&$expand=Owners,Author${filter}`,
       headers: { "Accept": "application/json; odata=verbose" },
@@ -109,7 +110,7 @@ const App = () => {
               });
             },
             error: (xhr, status, error) => {
-              console.error('Error checking site admin status:', error);
+12              console.error('Error checking site admin status:', error);
               addNotification('Failed to check user permissions.', 'error');
               setIsLoadingUser(false);
               loadSurveys();
@@ -145,7 +146,7 @@ const App = () => {
 
   return (
     <div className="flex flex-col h-screen">
-      <div className="fixed top-4 right-4 z-50 space-y-2">
+      <div className="fixed top-4 right-4 z-60 space-y-2">
         {notifications.map(n => (
           <Notification
             key={n.id}
@@ -309,7 +310,7 @@ const QRModal = ({ url, onClose, addNotification }) => {
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div className="fixed inset-0 flex items-center justify-center z-50">
       <div className="bg-white p-6 rounded-lg shadow-xl">
         <canvas ref={qrRef} className="mx-auto"></canvas>
         <div className="mt-4 flex gap-2 justify-center">
@@ -494,7 +495,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification, currentUserId }) 
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div className="fixed inset-0 flex items-center justify-center z-50">
       <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md max-h-96 overflow-y-auto">
         <h2 className="text-lg font-bold mb-4">Edit Metadata</h2>
         <div className="space-y-4">
