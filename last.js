@@ -20,6 +20,7 @@ const App = () => {
   const [surveys, setSurveys] = useState([]);
   const [userRole, setUserRole] = useState('');
   const [currentUser, setCurrentUser] = useState(null);
+  const [isSiteAdmin, setIsSiteAdmin] = useState(false);
   const [filters, setFilters] = useState({ status: [], search: '' });
   const [isSideNavOpen, setIsSideNavOpen] = useState(false);
   const [isLoadingUser, setIsLoadingUser] = useState(true);
@@ -38,7 +39,8 @@ const App = () => {
     if (!currentUser) return;
     setIsLoadingSurveys(true);
     const userId = currentUser.get_id();
-    const filter = userId ? `&$filter=Owners/Id eq ${userId} and Author/Id eq ${userId}` : '';
+    console.log('Loading surveys for userId:', userId); // Debug
+    const filter = isSiteAdmin ? '' : `&$filter=Owners/Id eq ${userId} or Author/Id eq ${userId}`;
     try {
       const response = await $.ajax({
         url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Id,Owners/Title,Author/Id,StartDate,EndDate,Status,Archive,surveyJson&$expand=Owners,Author${filter}`,
@@ -46,11 +48,22 @@ const App = () => {
         xhrFields: { withCredentials: true }
       });
       console.log('Surveys API response (attempt ' + (retryCount + 1) + '):', response.d.results); // Debug
-      const surveys = response.d.results.map(s => ({
-        ...s,
-        Owners: { results: s.Owners ? s.Owners.results || [] : [] },
-        Description: s.surveyJson ? (JSON.parse(s.surveyJson)?.description || 'No description available') : 'No description available'
-      }));
+      const surveys = response.d.results.map(s => {
+        let description = 'No description available';
+        try {
+          if (s.surveyJson) {
+            const parsed = JSON.parse(s.surveyJson);
+            description = parsed?.description || 'No description available';
+          }
+        } catch (e) {
+          console.error(`Error parsing surveyJson for survey ${s.Id}:`, e);
+        }
+        return {
+          ...s,
+          Owners: { results: s.Owners ? s.Owners.results || [] : [] },
+          Description: description
+        };
+      });
       const updatedSurveys = await Promise.all(surveys.map(s => 
         $.ajax({
           url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('SurveyResponses')/items?$filter=SurveyID eq ${s.Id}&$top=1&$inlinecount=allpages`,
@@ -67,7 +80,7 @@ const App = () => {
       setSurveys(updatedSurveys);
       setIsLoadingSurveys(false);
       if (updatedSurveys.length === 0) {
-        addNotification('No surveys found where you are the creator and owner.', 'warning');
+        addNotification(`No surveys found for user ID ${userId}. Ensure you are an owner or creator.`, 'warning');
       }
     } catch (error) {
       console.error('Error fetching surveys (attempt ' + (retryCount + 1) + '):', error);
@@ -75,7 +88,7 @@ const App = () => {
         console.log('Retrying loadSurveys in ' + delay + 'ms...');
         setTimeout(() => loadSurveys(retryCount + 1, maxRetries, delay * 2), delay);
       } else {
-        addNotification('Failed to load surveys after ' + maxRetries + ' attempts. Ensure the "Surveys" list exists.', 'error');
+        addNotification(`Failed to load surveys after ${maxRetries} attempts. Ensure the "Surveys" list exists and you have read access.`, 'error');
         setIsLoadingSurveys(false);
       }
     }
@@ -96,6 +109,7 @@ const App = () => {
             xhrFields: { withCredentials: true },
             success: (userData) => {
               const isSiteAdmin = userData.d.IsSiteAdmin;
+              setIsSiteAdmin(isSiteAdmin);
               $.ajax({
                 url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser/groups`,
                 headers: { "Accept": "application/json; odata=verbose" },
@@ -276,9 +290,7 @@ const SurveyCard = ({ survey, userRole, currentUserId, addNotification, loadSurv
         <p className="text-gray-600">{survey.Description}</p>
         <p>Responses: {survey.responseCount}</p>
         <p>Status: {survey.Status} {survey.Archive ? '(Archived)' : ''}</p>
-        <p>
-          Dates: {formatDate(survey.StartDate)} - {formatDate(survey.EndDate)}
-        </p>
+        <p>Dates: {formatDate(survey.StartDate)} - {formatDate(survey.EndDate)}</p>
       </div>
       <div className="mt-4 flex flex-wrap gap-2 border-t pt-2">
         <button 
@@ -461,7 +473,6 @@ const EditModal = ({ survey, onClose, addNotification, currentUserId }) => {
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      // Ensure current user remains in Owners
       if (!form.Owners.some(o => o.Id === currentUserId)) {
         throw new Error('You must remain an owner of the survey.');
       }
@@ -533,7 +544,6 @@ const EditModal = ({ survey, onClose, addNotification, currentUserId }) => {
       }
 
       console.log('Metadata save successful for survey:', survey.Id); // Debug
-      // Force page reload to ensure SharePoint updates are reflected
       setTimeout(() => location.reload(), 500);
       onClose();
     } catch (error) {
