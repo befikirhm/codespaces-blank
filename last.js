@@ -35,35 +35,61 @@ const App = () => {
     }, 5000);
   };
 
+  const checkListExists = async () => {
+    try {
+      const response = await $.ajax({
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')?$select=Title`,
+        headers: { "Accept": "application/json; odata=verbose" },
+        xhrFields: { withCredentials: true }
+      });
+      console.log('Surveys list exists:', response.d.Title); // Debug
+      return true;
+    } catch (error) {
+      console.error('Error checking Surveys list:', error);
+      addNotification('Surveys list not found or inaccessible.', 'error');
+      return false;
+    }
+  };
+
   const loadSurveys = async (retryCount = 0, maxRetries = 3, delay = 1000) => {
     if (!currentUser) return;
     setIsLoadingSurveys(true);
     const userId = currentUser.get_id();
-    console.log('Loading surveys for userId:', userId); // Debug
-    const filter = isSiteAdmin ? '' : `&$filter=Owners/Id eq ${userId} or Author/Id eq ${userId}`;
+    console.log('Loading surveys for userId:', userId, 'isSiteAdmin:', isSiteAdmin); // Debug
+    const selectFields = 'Id,Title,Owners/Id,Owners/Title,Author/Id,Author/Title,StartDate,EndDate,Status,Archive';
+    let filter = isSiteAdmin ? '' : `&$filter=Owners/Id eq ${userId} or Author/Id eq ${userId}`;
+    
+    // First try: Fetch all surveys to debug data
+    try {
+      const allSurveysResponse = await $.ajax({
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=${selectFields}&$expand=Owners,Author`,
+        headers: { "Accept": "application/json; odata=verbose" },
+        xhrFields: { withCredentials: true }
+      });
+      console.log('All surveys (no filter, attempt ' + (retryCount + 1) + '):', allSurveysResponse.d.results); // Debug
+      if (allSurveysResponse.d.results.length === 0) {
+        addNotification('No surveys exist in the Surveys list.', 'warning');
+      } else {
+        addNotification(`Debug: Found ${allSurveysResponse.d.results.length} surveys in list. Checking user access...`, 'info');
+      }
+    } catch (error) {
+      console.error('Error fetching all surveys:', error);
+      addNotification('Failed to fetch all surveys for debugging.', 'error');
+    }
+
+    // Main query with filter
     try {
       const response = await $.ajax({
-        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Id,Owners/Title,Author/Id,StartDate,EndDate,Status,Archive,surveyJson&$expand=Owners,Author${filter}`,
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=${selectFields}&$expand=Owners,Author${filter}`,
         headers: { "Accept": "application/json; odata=verbose" },
         xhrFields: { withCredentials: true }
       });
       console.log('Surveys API response (attempt ' + (retryCount + 1) + '):', response.d.results); // Debug
-      const surveys = response.d.results.map(s => {
-        let description = 'No description available';
-        try {
-          if (s.surveyJson) {
-            const parsed = JSON.parse(s.surveyJson);
-            description = parsed?.description || 'No description available';
-          }
-        } catch (e) {
-          console.error(`Error parsing surveyJson for survey ${s.Id}:`, e);
-        }
-        return {
-          ...s,
-          Owners: { results: s.Owners ? s.Owners.results || [] : [] },
-          Description: description
-        };
-      });
+      const surveys = response.d.results.map(s => ({
+        ...s,
+        Owners: { results: s.Owners ? s.Owners.results || [] : [] },
+        Description: 'No description available' // Placeholder, add surveyJson later if confirmed
+      }));
       const updatedSurveys = await Promise.all(surveys.map(s => 
         $.ajax({
           url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('SurveyResponses')/items?$filter=SurveyID eq ${s.Id}&$top=1&$inlinecount=allpages`,
@@ -88,7 +114,7 @@ const App = () => {
         console.log('Retrying loadSurveys in ' + delay + 'ms...');
         setTimeout(() => loadSurveys(retryCount + 1, maxRetries, delay * 2), delay);
       } else {
-        addNotification(`Failed to load surveys after ${maxRetries} attempts. Ensure the "Surveys" list exists and you have read access.`, 'error');
+        addNotification(`Failed to load surveys after ${maxRetries} attempts. Error: ${error.responseText || 'Unknown error'}`, 'error');
         setIsLoadingSurveys(false);
       }
     }
@@ -107,14 +133,21 @@ const App = () => {
             url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser?$select=Id,IsSiteAdmin`,
             headers: { "Accept": "application/json; odata=verbose" },
             xhrFields: { withCredentials: true },
-            success: (userData) => {
+            success: async (userData) => {
               const isSiteAdmin = userData.d.IsSiteAdmin;
               setIsSiteAdmin(isSiteAdmin);
+              console.log('Current user ID:', userData.d.Id, 'IsSiteAdmin:', isSiteAdmin); // Debug
+              const listExists = await checkListExists();
+              if (!listExists) {
+                setIsLoadingUser(false);
+                return;
+              }
               $.ajax({
                 url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser/groups`,
                 headers: { "Accept": "application/json; odata=verbose" },
                 xhrFields: { withCredentials: true },
                 success: (groupData) => {
+                  console.log('User groups:', groupData.d.results); // Debug
                   const isOwnerGroup = groupData.d.results.some(g => g.Title.includes('Owners'));
                   setUserRole(isSiteAdmin || isOwnerGroup ? 'owner' : 'member');
                   setIsLoadingUser(false);
@@ -140,7 +173,6 @@ const App = () => {
           console.error('Error loading user:', args.get_message());
           addNotification('Failed to load user information.', 'error');
           setIsLoadingUser(false);
-          loadSurveys();
         }
       );
     });
@@ -224,7 +256,7 @@ const App = () => {
 };
 
 const Notification = ({ message, type, onClose }) => (
-  <div className={`p-4 rounded shadow flex justify-between items-center ${type === 'success' ? 'bg-green-100 text-green-800' : type === 'warning' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
+  <div className={`p-4 rounded shadow flex justify-between items-center ${type === 'success' ? 'bg-green-100 text-green-800' : type === 'warning' ? 'bg-yellow-100 text-yellow-800' : type === 'error' ? 'bg-red-100 text-red-800' : 'bg-blue-100 text-blue-800'}`}>
     <span>{message}</span>
     <button onClick={onClose} className="ml-4 text-lg font-bold" aria-label="Close notification">&times;</button>
   </div>
