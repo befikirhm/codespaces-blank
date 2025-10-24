@@ -58,8 +58,8 @@ const App = () => {
     console.log('Loading surveys for userId:', userId, 'isSiteAdmin:', isSiteAdmin); // Debug
     const selectFields = 'Id,Title,Owners/Id,Owners/Title,Author/Id,Author/Title,StartDate,EndDate,Status,Archive';
     let filter = isSiteAdmin ? '' : `&$filter=Owners/Id eq ${userId} or Author/Id eq ${userId}`;
-    
-    // First try: Fetch all surveys to debug data
+
+    // Debug: Fetch all surveys to check list contents
     try {
       const allSurveysResponse = await $.ajax({
         url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=${selectFields}&$expand=Owners,Author`,
@@ -88,7 +88,7 @@ const App = () => {
       const surveys = response.d.results.map(s => ({
         ...s,
         Owners: { results: s.Owners ? s.Owners.results || [] : [] },
-        Description: 'No description available' // Placeholder, add surveyJson later if confirmed
+        Description: 'No description available' // Placeholder
       }));
       const updatedSurveys = await Promise.all(surveys.map(s => 
         $.ajax({
@@ -382,7 +382,7 @@ const SurveyCard = ({ survey, userRole, currentUserId, addNotification, loadSurv
         </button>
       </div>
       {showQRModal && <QRModal url={formUrl} onClose={() => setShowQRModal(false)} addNotification={addNotification} />}
-      {showEditModal && <EditModal survey={survey} onClose={() => setShowEditModal(false)} addNotification={addNotification} currentUserId={currentUserId} />}
+      {showEditModal && <EditModal survey={survey} onClose={() => setShowEditModal(false)} addNotification={addNotification} currentUserId={currentUserId} loadSurveys={loadSurveys} />}
     </div>
   );
 };
@@ -440,7 +440,7 @@ const QRModal = ({ url, onClose, addNotification }) => {
   );
 };
 
-const EditModal = ({ survey, onClose, addNotification, currentUserId }) => {
+const EditModal = ({ survey, onClose, addNotification, currentUserId, loadSurveys }) => {
   const [form, setForm] = useState({
     Owners: Array.isArray(survey.Owners?.results) ? survey.Owners.results.map(o => ({ Id: o.Id, Title: o.Title })) : [],
     StartDate: survey.StartDate ? new Date(survey.StartDate).toISOString().split('T')[0] : '',
@@ -576,7 +576,7 @@ const EditModal = ({ survey, onClose, addNotification, currentUserId }) => {
       }
 
       console.log('Metadata save successful for survey:', survey.Id); // Debug
-      setTimeout(() => location.reload(), 500);
+      loadSurveys(); // Refresh surveys without page reload
       onClose();
     } catch (error) {
       console.error('Error updating survey:', error);
