@@ -7,8 +7,13 @@ const getDigest = () => {
     url: `${_spPageContextInfo.webAbsoluteUrl}/_api/contextinfo`,
     headers: {
       "Accept": "application/json; odata=verbose"
-    }
-  }).then(data => data.d.GetContextWebInformation.FormDigestValue);
+    },
+    xhrFields: { withCredentials: true }
+  }).then(data => data.d.GetContextWebInformation.FormDigestValue)
+    .catch(error => {
+      console.error('Error fetching digest:', error);
+      throw new Error('Failed to fetch request digest token.');
+    });
 };
 
 const App = () => {
@@ -35,6 +40,7 @@ const App = () => {
     $.ajax({
       url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Id,Owners/Title,StartDate,EndDate,Status,Archive&$expand=Owners${filter}`,
       headers: { "Accept": "application/json; odata=verbose" },
+      xhrFields: { withCredentials: true },
       success: (data) => {
         const surveys = data.d.results.map(s => ({
           ...s,
@@ -43,12 +49,13 @@ const App = () => {
         Promise.all(surveys.map(s => 
           $.ajax({
             url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('SurveyResponses')/items?$filter=SurveyID eq ${s.Id}&$top=1&$inlinecount=allpages`,
-            headers: { "Accept": "application/json; odata=verbose" }
+            headers: { "Accept": "application/json; odata=verbose" },
+            xhrFields: { withCredentials: true },
           }).then(res => ({ ...s, responseCount: res.d.__count || 0 }))
           .catch(error => {
             console.error(`Error fetching responses for survey ${s.Id}:`, error);
             addNotification(`Failed to load response count for survey "${s.Title}".`, 'error');
-            return { ...s, responseCount: 0 }; // Fallback to 0 responses
+            return { ...s, responseCount: 0 };
           })
         )).then(updatedSurveys => {
           setSurveys(updatedSurveys);
@@ -72,16 +79,16 @@ const App = () => {
       context.executeQueryAsync(
         () => {
           setCurrentUser(user);
-          // Check if user is a site collection administrator
           $.ajax({
             url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser?$select=IsSiteAdmin`,
             headers: { "Accept": "application/json; odata=verbose" },
+            xhrFields: { withCredentials: true },
             success: (userData) => {
               const isSiteAdmin = userData.d.IsSiteAdmin;
-              // Check group membership for "Owners"
               $.ajax({
                 url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser/groups`,
                 headers: { "Accept": "application/json; odata=verbose" },
+                xhrFields: { withCredentials: true },
                 success: (groupData) => {
                   const isOwnerGroup = groupData.d.results.some(g => g.Title.includes('Owners'));
                   const isOwner = isSiteAdmin || isOwnerGroup;
@@ -346,7 +353,6 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
 
-  // Search users with debounce using User Information List
   useEffect(() => {
     if (!searchTerm) {
       setSearchResults([]);
@@ -359,6 +365,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
       $.ajax({
         url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/siteusers?$select=Id,Title&$filter=substringof('${encodeURIComponent(searchTerm)}',Title)&$top=10`,
         headers: { "Accept": "application/json; odata=verbose" },
+        xhrFields: { withCredentials: true },
         success: (data) => {
           const users = data.d.results
             .filter(u => u.Id && u.Title)
@@ -393,7 +400,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      // Fetch RequestDigest token
+      // Fetch a fresh RequestDigest token
       const digest = await getDigest();
 
       const payload = {
@@ -421,34 +428,49 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
           "Accept": "application/json; odata=verbose",
           "Content-Type": "application/json; odata=verbose",
           "X-RequestDigest": digest
-        }
+        },
+        xhrFields: { withCredentials: true }
       });
 
-      // Break inheritance
-      await $.ajax({
-        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})/breakroleinheritance(copyRoleAssignments=false, clearSubscopes=true)`,
-        type: 'POST',
-        headers: {
-          "Accept": "application/json; odata=verbose",
-          "X-RequestDigest": digest
-        }
+      // Check if user has Manage Permissions
+      const permissions = await $.ajax({
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})/effectiveBasePermissions`,
+        headers: { "Accept": "application/json; odata=verbose" },
+        xhrFields: { withCredentials: true }
       });
+      const hasManagePermissions = permissions.d.EffectiveBasePermissions.High & 0x00000080; // Manage Permissions bit
 
-      // Add permissions for owners
-      if (form.Owners.length > 0) {
-        await Promise.all(form.Owners.map(user => 
-          $.ajax({
-            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})/roleassignments/addroleassignment(principalid=${user.Id}, roledefid=1073741827)`,
-            type: 'POST',
-            headers: {
-              "Accept": "application/json; odata=verbose",
-              "X-RequestDigest": digest
-            }
-          })
-        ));
+      if (hasManagePermissions) {
+        // Break inheritance
+        await $.ajax({
+          url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})/breakroleinheritance(copyRoleAssignments=false, clearSubscopes=true)`,
+          type: 'POST',
+          headers: {
+            "Accept": "application/json; odata=verbose",
+            "X-RequestDigest": digest
+          },
+          xhrFields: { withCredentials: true }
+        });
+
+        // Add permissions for owners
+        if (form.Owners.length > 0) {
+          await Promise.all(form.Owners.map(user => 
+            $.ajax({
+              url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})/roleassignments/addroleassignment(principalid=${user.Id}, roledefid=1073741827)`,
+              type: 'POST',
+              headers: {
+                "Accept": "application/json; odata=verbose",
+                "X-RequestDigest": digest
+              },
+              xhrFields: { withCredentials: true }
+            })
+          ));
+        }
+        addNotification('Survey metadata and permissions updated successfully!');
+      } else {
+        addNotification('Survey metadata updated. Permissions not modified due to insufficient access.', 'warning');
       }
 
-      addNotification('Survey metadata updated successfully!');
       if (typeof onSave === 'function') {
         onSave();
       } else {
@@ -457,7 +479,13 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
       onClose();
     } catch (error) {
       console.error('Error updating survey:', error);
-      addNotification(`Failed to update survey metadata: ${error.responseText || error.message}`, 'error');
+      let errorMessage = error.responseText || error.message;
+      if (error.status === 403) {
+        errorMessage = 'Access denied. Ensure you have Manage Lists or Full Control permissions to modify permissions.';
+      } else if (errorMessage.includes('Invalid Form Digest')) {
+        errorMessage = 'Invalid or expired request digest token. Please try again.';
+      }
+      addNotification(`Failed to update survey: ${errorMessage}`, 'error');
     } finally {
       setIsSaving(false);
     }
