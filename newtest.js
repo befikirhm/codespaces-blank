@@ -300,7 +300,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
 
-  // Search users with debounce
+  // Search users with debounce using User Information List
   useEffect(() => {
     if (!searchTerm) {
       setSearchResults([]);
@@ -311,13 +311,15 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
     const debounce = setTimeout(() => {
       setIsLoadingUsers(true);
       $.ajax({
-        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/SP.UserProfiles.PeopleManager/SearchPeople?query=${encodeURIComponent(searchTerm)}`,
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/siteusers?$select=Id,Title&$filter=substringof('${searchTerm}',Title)&$top=10`,
         headers: { "Accept": "application/json; odata=verbose" },
         success: (data) => {
           const users = data.d.results
-            .filter(u => u.Id && u.PreferredName) // Ensure valid users
-            .map(u => ({ Id: parseInt(u.Id), Title: u.PreferredName }));
-          setSearchResults(users);
+            .filter(u => u.Id && u.Title) // Ensure valid users
+            .map(u => ({ Id: u.Id, Title: u.Title }));
+          // Exclude already selected users
+          const availableUsers = users.filter(u => !form.Owners.some(selected => selected.Id === u.Id));
+          setSearchResults(availableUsers);
           setIsLoadingUsers(false);
           setShowDropdown(true);
         },
@@ -331,18 +333,16 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
     }, 300);
 
     return () => clearTimeout(debounce);
-  }, [searchTerm]);
+  }, [searchTerm, form.Owners]);
 
   const handleUserSelect = (user) => {
-    if (!form.Owners.some(o => o.Id === user.Id)) {
-      setForm({ ...form, Owners: [...form.Owners, user] });
-    }
+    setForm(prev => ({ ...prev, Owners: [...prev.Owners, user] }));
     setSearchTerm('');
     setShowDropdown(false);
   };
 
   const handleUserRemove = (userId) => {
-    setForm({ ...form, Owners: form.Owners.filter(o => o.Id !== userId) });
+    setForm(prev => ({ ...prev, Owners: prev.Owners.filter(o => o.Id !== userId) }));
   };
 
   const handleSave = () => {
@@ -359,7 +359,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
     if (form.EndDate) {
       payload.EndDate = new Date(form.EndDate).toISOString();
     }
-    console.log('Saving payload:', payload);
+    console.log('Saving payload:', payload); // Debug
     $.ajax({
       url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})`,
       type: 'POST',
@@ -371,6 +371,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
         "Content-Type": "application/json; odata=verbose"
       },
       success: () => {
+        // Break inheritance and set permissions
         $.ajax({
           url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id}/breakroleinheritance(copyRoleAssignments=false, clearSubscopes=true)`,
           type: 'POST',
@@ -417,7 +418,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md">
+      <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md max-h-96 overflow-y-auto">
         <h2 className="text-lg font-bold mb-4">Edit Metadata</h2>
         <div className="space-y-4">
           <div>
@@ -427,7 +428,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
                 type="text"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search for users..."
+                placeholder="Search for users by name..."
                 className="w-full p-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               {isLoadingUsers && (
@@ -436,12 +437,12 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
                 </div>
               )}
               {showDropdown && searchResults.length > 0 && (
-                <ul className="absolute z-10 w-full bg-white border rounded mt-1 max-h-48 overflow-y-auto">
+                <ul className="absolute z-10 w-full bg-white border rounded mt-1 max-h-48 overflow-y-auto shadow-lg">
                   {searchResults.map(user => (
                     <li
                       key={user.Id}
                       onClick={() => handleUserSelect(user)}
-                      className="p-2 hover:bg-gray-100 cursor-pointer"
+                      className="p-2 hover:bg-gray-100 cursor-pointer border-b last:border-b-0"
                     >
                       {user.Title}
                     </li>
@@ -450,20 +451,24 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
               )}
             </div>
             <div className="mt-2 flex flex-wrap gap-2">
-              {form.Owners.map(user => (
-                <div
-                  key={user.Id}
-                  className="flex items-center bg-blue-100 text-blue-800 px-2 py-1 rounded"
-                >
-                  <span>{user.Title}</span>
-                  <button
-                    onClick={() => handleUserRemove(user.Id)}
-                    className="ml-2 text-red-600 font-bold"
+              {form.Owners.length === 0 ? (
+                <p className="text-gray-500 text-sm">No owners selected</p>
+              ) : (
+                form.Owners.map(user => (
+                  <div
+                    key={user.Id}
+                    className="flex items-center bg-blue-100 text-blue-800 px-2 py-1 rounded-full text-sm"
                   >
-                    &times;
-                  </button>
-                </div>
-              ))}
+                    <span>{user.Title}</span>
+                    <button
+                      onClick={() => handleUserRemove(user.Id)}
+                      className="ml-2 text-red-600 hover:text-red-800 font-bold"
+                    >
+                      &times;
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
           </div>
           <div>
@@ -471,7 +476,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
             <input
               type="date"
               value={form.StartDate}
-              onChange={(e) => setForm({ ...form, StartDate: e.target.value })}
+              onChange={(e) => setForm(prev => ({ ...prev, StartDate: e.target.value }))}
               className="w-full p-2 border rounded"
             />
           </div>
@@ -480,7 +485,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
             <input
               type="date"
               value={form.EndDate}
-              onChange={(e) => setForm({ ...form, EndDate: e.target.value })}
+              onChange={(e) => setForm(prev => ({ ...prev, EndDate: e.target.value }))}
               className="w-full p-2 border rounded"
             />
           </div>
@@ -488,7 +493,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
             <label className="block mb-1">Status</label>
             <select
               value={form.Status}
-              onChange={(e) => setForm({ ...form, Status: e.target.value })}
+              onChange={(e) => setForm(prev => ({ ...prev, Status: e.target.value }))}
               className="w-full p-2 border rounded"
             >
               <option value="Publish">Publish</option>
@@ -500,7 +505,7 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
               <input
                 type="checkbox"
                 checked={form.Archive}
-                onChange={(e) => setForm({ ...form, Archive: e.target.checked })}
+                onChange={(e) => setForm(prev => ({ ...prev, Archive: e.target.checked }))}
                 className="mr-2"
               />
               Archive
