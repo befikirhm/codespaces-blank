@@ -9,7 +9,7 @@ const App = () => {
   const [isSideNavOpen, setIsSideNavOpen] = useState(false);
   const [isLoadingUser, setIsLoadingUser] = useState(true);
   const [isLoadingSurveys, setIsLoadingSurveys] = useState(false);
-  const [notifications, setNotifications] = useState([]); // [{ id, message, type }]
+  const [notifications, setNotifications] = useState([]);
 
   const addNotification = (message, type = 'success') => {
     const id = Date.now();
@@ -55,12 +55,15 @@ const App = () => {
 
   const loadSurveys = (mode) => {
     setIsLoadingSurveys(true);
-    const filter = mode === 'owned' ? `&$filter=Owners/Id eq ${currentUser.get_id()}` : '';
+    const filter = mode === 'owned' && currentUser ? `&$filter=Owners/Id eq ${currentUser.get_id()}` : '';
     $.ajax({
-      url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Title,StartDate,EndDate,Status,Archive&$expand=Owners${filter}`,
+      url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items?$select=Id,Title,Owners/Id,Owners/Title,StartDate,EndDate,Status,Archive&$expand=Owners${filter}`,
       headers: { "Accept": "application/json; odata=verbose" },
       success: (data) => {
-        const surveys = data.d.results;
+        const surveys = data.d.results.map(s => ({
+          ...s,
+          Owners: { results: s.Owners ? s.Owners.results || [] : [] }
+        }));
         Promise.all(surveys.map(s => 
           $.ajax({
             url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Responses')/items?$filter=SurveyID eq ${s.Id}&$top=1&$inlinecount=allpages`,
@@ -285,46 +288,82 @@ const QRModal = ({ url, onClose, addNotification }) => {
 
 const EditModal = ({ survey, onClose, onSave, addNotification }) => {
   const [form, setForm] = useState({
-    Owners: survey.Owners.results.map(o => o.Id),
+    Owners: Array.isArray(survey.Owners?.results) ? survey.Owners.results.map(o => ({ Id: o.Id, Title: o.Title })) : [],
     StartDate: survey.StartDate ? new Date(survey.StartDate).toISOString().split('T')[0] : '',
     EndDate: survey.EndDate ? new Date(survey.EndDate).toISOString().split('T')[0] : '',
-    Status: survey.Status,
-    Archive: survey.Archive
+    Status: survey.Status || 'Draft',
+    Archive: survey.Archive || false
   });
-  const [users, setUsers] = useState([]);
-  const [isLoadingUsers, setIsLoadingUsers] = useState(true);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [showDropdown, setShowDropdown] = useState(false);
 
+  // Search users with debounce
   useEffect(() => {
-    setIsLoadingUsers(true);
-    $.ajax({
-      url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/siteusers?$select=Id,Title`,
-      headers: { "Accept": "application/json; odata=verbose" },
-      success: (data) => {
-        setUsers(data.d.results.filter(u => u.Title));
-        setIsLoadingUsers(false);
-      },
-      error: (xhr, status, error) => {
-        console.error('Error fetching users:', error);
-        addNotification('Failed to load users.', 'error');
-        setIsLoadingUsers(false);
-      }
-    });
-  }, []);
+    if (!searchTerm) {
+      setSearchResults([]);
+      setShowDropdown(false);
+      return;
+    }
+
+    const debounce = setTimeout(() => {
+      setIsLoadingUsers(true);
+      $.ajax({
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/SP.UserProfiles.PeopleManager/SearchPeople?query=${encodeURIComponent(searchTerm)}`,
+        headers: { "Accept": "application/json; odata=verbose" },
+        success: (data) => {
+          const users = data.d.results
+            .filter(u => u.Id && u.PreferredName) // Ensure valid users
+            .map(u => ({ Id: parseInt(u.Id), Title: u.PreferredName }));
+          setSearchResults(users);
+          setIsLoadingUsers(false);
+          setShowDropdown(true);
+        },
+        error: (xhr, status, error) => {
+          console.error('Error searching users:', error);
+          addNotification('Failed to search users.', 'error');
+          setIsLoadingUsers(false);
+          setShowDropdown(false);
+        }
+      });
+    }, 300);
+
+    return () => clearTimeout(debounce);
+  }, [searchTerm]);
+
+  const handleUserSelect = (user) => {
+    if (!form.Owners.some(o => o.Id === user.Id)) {
+      setForm({ ...form, Owners: [...form.Owners, user] });
+    }
+    setSearchTerm('');
+    setShowDropdown(false);
+  };
+
+  const handleUserRemove = (userId) => {
+    setForm({ ...form, Owners: form.Owners.filter(o => o.Id !== userId) });
+  };
 
   const handleSave = () => {
     setIsSaving(true);
+    const payload = {
+      '__metadata': { 'type': 'SP.Data.SurveysListItem' },
+      OwnersId: { results: form.Owners.map(o => o.Id) },
+      Status: form.Status,
+      Archive: form.Archive
+    };
+    if (form.StartDate) {
+      payload.StartDate = new Date(form.StartDate).toISOString();
+    }
+    if (form.EndDate) {
+      payload.EndDate = new Date(form.EndDate).toISOString();
+    }
+    console.log('Saving payload:', payload);
     $.ajax({
       url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id})`,
       type: 'POST',
-      data: JSON.stringify({
-        '__metadata': { 'type': 'SP.Data.SurveysListItem' },
-        OwnersId: { results: form.Owners },
-        StartDate: form.StartDate || null,
-        EndDate: form.EndDate || null,
-        Status: form.Status,
-        Archive: form.Archive
-      }),
+      data: JSON.stringify(payload),
       headers: {
         "X-HTTP-Method": "MERGE",
         "If-Match": "*",
@@ -337,9 +376,16 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
           type: 'POST',
           headers: { "Accept": "application/json; odata=verbose" },
           success: () => {
-            Promise.all(form.Owners.map(userId => 
+            if (form.Owners.length === 0) {
+              setIsSaving(false);
+              addNotification('Survey metadata updated successfully!');
+              onSave();
+              onClose();
+              return;
+            }
+            Promise.all(form.Owners.map(user => 
               $.ajax({
-                url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id}/roleassignments/addroleassignment(principalid=${userId}, roledefid=1073741827)`,
+                url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('Surveys')/items(${survey.Id}/roleassignments/addroleassignment(principalid=${user.Id}, roledefid=1073741827)`,
                 type: 'POST',
                 headers: { "Accept": "application/json; odata=verbose" }
               })
@@ -350,20 +396,20 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
               onClose();
             }).catch(error => {
               console.error('Error setting permissions:', error);
-              addNotification('Failed to update survey metadata.', 'error');
+              addNotification('Failed to update survey permissions.', 'error');
               setIsSaving(false);
             });
           },
           error: (xhr, status, error) => {
-            console.error('Error setting permissions:', error);
-            addNotification('Failed to update survey metadata.', 'error');
+            console.error('Error breaking role inheritance:', error);
+            addNotification('Failed to update survey permissions.', 'error');
             setIsSaving(false);
           }
         });
       },
       error: (xhr, status, error) => {
-        console.error('Error updating survey:', error);
-        addNotification('Failed to update survey metadata.', 'error');
+        console.error('Error updating survey:', error, xhr.responseText);
+        addNotification(`Failed to update survey metadata: ${xhr.responseText}`, 'error');
         setIsSaving(false);
       }
     });
@@ -376,23 +422,49 @@ const EditModal = ({ survey, onClose, onSave, addNotification }) => {
         <div className="space-y-4">
           <div>
             <label className="block mb-1">Owners</label>
-            {isLoadingUsers ? (
-              <div className="flex items-center">
-                <div className="animate-spin rounded-full h-6 w-6 border-t-2 border-blue-500 mr-2"></div>
-                <span>Loading users...</span>
-              </div>
-            ) : (
-              <select
-                multiple
-                value={form.Owners}
-                onChange={(e) => setForm({ ...form, Owners: Array.from(e.target.selectedOptions, o => parseInt(o.value)) })}
-                className="w-full p-2 border rounded"
-              >
-                {users.map(user => (
-                  <option key={user.Id} value={user.Id}>{user.Title}</option>
-                ))}
-              </select>
-            )}
+            <div className="relative">
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Search for users..."
+                className="w-full p-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              {isLoadingUsers && (
+                <div className="absolute top-2 right-2">
+                  <div className="animate-spin rounded-full h-5 w-5 border-t-2 border-blue-500"></div>
+                </div>
+              )}
+              {showDropdown && searchResults.length > 0 && (
+                <ul className="absolute z-10 w-full bg-white border rounded mt-1 max-h-48 overflow-y-auto">
+                  {searchResults.map(user => (
+                    <li
+                      key={user.Id}
+                      onClick={() => handleUserSelect(user)}
+                      className="p-2 hover:bg-gray-100 cursor-pointer"
+                    >
+                      {user.Title}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {form.Owners.map(user => (
+                <div
+                  key={user.Id}
+                  className="flex items-center bg-blue-100 text-blue-800 px-2 py-1 rounded"
+                >
+                  <span>{user.Title}</span>
+                  <button
+                    onClick={() => handleUserRemove(user.Id)}
+                    className="ml-2 text-red-600 font-bold"
+                  >
+                    &times;
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
           <div>
             <label className="block mb-1">Start Date</label>
