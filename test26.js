@@ -43,7 +43,7 @@ const App = () => {
       return;
     }
 
-    const userId = currentUser.get_id();
+    const userId = currentUser.get_id ? currentUser.get_id() : currentUser.Id;
     if (!userId) {
       console.error('loadSurveys: userId is undefined');
       addNotification('Cannot load surveys: User ID not available.', 'error');
@@ -95,7 +95,6 @@ const App = () => {
       }));
       const updatedSurveys = await Promise.all(surveys.map(async s => {
         try {
-          // Check SurveyResponses list access and schema
           const responseQuery = `${_spPageContextInfo.webAbsoluteUrl}/_api/web/lists/getbytitle('SurveyResponses')/items?$select=Id,SurveyID&$filter=SurveyID eq ${s.Id}&$top=1000`;
           console.log(`Fetching responses for survey ${s.Id}: ${responseQuery}`); // Debug
           const res = await $.ajax({
@@ -116,7 +115,7 @@ const App = () => {
             responseText: error.responseText
           });
           addNotification(`Failed to load response count for survey "${s.Title}". Error: ${error.statusText || 'Unknown error'}`, 'error');
-          return { ...s, responseCount: null }; // Avoid defaulting to 0 to highlight issue
+          return { ...s, responseCount: null };
         }
       }));
       console.log('Updated surveys:', updatedSurveys); // Debug
@@ -139,21 +138,76 @@ const App = () => {
 
   useEffect(() => {
     setIsLoadingUser(true);
+    console.log('Starting user load...'); // Debug
+    if (typeof SP === 'undefined' || !SP.SOD) {
+      console.error('SP.SOD is undefined. Ensure sp.js is loaded.');
+      addNotification('SharePoint JavaScript library (sp.js) not loaded.', 'error');
+      // Fallback to REST API
+      $.ajax({
+        url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser?$select=Id,Title,IsSiteAdmin`,
+        headers: { "Accept": "application/json; odata=verbose" },
+        xhrFields: { withCredentials: true },
+        success: (userData) => {
+          console.log('REST API current user:', userData.d); // Debug
+          setCurrentUser({ Id: userData.d.Id, get_id: () => userData.d.Id, get_title: () => userData.d.Title });
+          setIsSiteAdmin(userData.d.IsSiteAdmin);
+          $.ajax({
+            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser/groups`,
+            headers: { "Accept": "application/json; odata=verbose" },
+            xhrFields: { withCredentials: true },
+            success: (groupData) => {
+              console.log('User groups:', groupData.d.results); // Debug
+              const isOwnerGroup = groupData.d.results.some(g => g.Title.includes('Owners'));
+              setUserRole(isSiteAdmin || isOwnerGroup ? 'owner' : 'member');
+              setIsLoadingUser(false);
+              loadSurveys();
+            },
+            error: (xhr, status, error) => {
+              console.error('Error fetching groups (REST):', { status, statusText: xhr.statusText, responseText: xhr.responseText });
+              addNotification('Failed to load user groups.', 'error');
+              setUserRole('member');
+              setIsLoadingUser(false);
+              loadSurveys();
+            }
+          });
+        },
+        error: (xhr, status, error) => {
+          console.error('Error loading user via REST API:', { status, statusText: xhr.statusText, responseText: xhr.responseText });
+          addNotification('Failed to load user information via REST API.', 'error');
+          setIsLoadingUser(false);
+        }
+      });
+      return;
+    }
+
     SP.SOD.executeFunc('sp.js', 'SP.ClientContext', () => {
+      console.log('sp.js loaded, initializing CSOM...'); // Debug
       const context = SP.ClientContext.get_current();
+      if (!context) {
+        console.error('SP.ClientContext is undefined');
+        addNotification('SharePoint context unavailable.', 'error');
+        setIsLoadingUser(false);
+        return;
+      }
       const user = context.get_web().get_currentUser();
+      if (!user) {
+        console.error('Current user object is undefined');
+        addNotification('Failed to initialize current user.', 'error');
+        setIsLoadingUser(false);
+        return;
+      }
       context.load(user);
       context.executeQueryAsync(
         () => {
+          console.log('CSOM user loaded:', user.get_title(), user.get_id()); // Debug
           setCurrentUser(user);
           $.ajax({
             url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser?$select=Id,IsSiteAdmin`,
             headers: { "Accept": "application/json; odata=verbose" },
             xhrFields: { withCredentials: true },
             success: (userData) => {
-              const isSiteAdmin = userData.d.IsSiteAdmin;
-              setIsSiteAdmin(isSiteAdmin);
-              console.log('Current user ID:', userData.d.Id, 'IsSiteAdmin:', isSiteAdmin); // Debug
+              console.log('REST API user data:', userData.d); // Debug
+              setIsSiteAdmin(userData.d.IsSiteAdmin);
               $.ajax({
                 url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser/groups`,
                 headers: { "Accept": "application/json; odata=verbose" },
@@ -166,15 +220,16 @@ const App = () => {
                   loadSurveys();
                 },
                 error: (xhr, status, error) => {
-                  console.error('Error fetching groups:', error);
+                  console.error('Error fetching groups:', { status, statusText: xhr.statusText, responseText: xhr.responseText });
                   addNotification('Failed to load user groups.', 'error');
+                  setUserRole('member');
                   setIsLoadingUser(false);
                   loadSurveys();
                 }
               });
             },
             error: (xhr, status, error) => {
-              console.error('Error checking site admin status:', error);
+              console.error('Error checking site admin status:', { status, statusText: xhr.statusText, responseText: xhr.responseText });
               addNotification('Failed to check user permissions.', 'error');
               setIsLoadingUser(false);
               loadSurveys();
@@ -182,9 +237,43 @@ const App = () => {
           });
         },
         (sender, args) => {
-          console.error('Error loading user:', args.get_message());
-          addNotification('Failed to load user information.', 'error');
-          setIsLoadingUser(false);
+          console.error('CSOM error loading user:', args.get_message(), args.get_stackTrace()); // Debug
+          addNotification(`Failed to load user via CSOM: ${args.get_message()}`, 'error');
+          // Fallback to REST API
+          $.ajax({
+            url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser?$select=Id,Title,IsSiteAdmin`,
+            headers: { "Accept": "application/json; odata=verbose" },
+            xhrFields: { withCredentials: true },
+            success: (userData) => {
+              console.log('REST API fallback user:', userData.d); // Debug
+              setCurrentUser({ Id: userData.d.Id, get_id: () => userData.d.Id, get_title: () => userData.d.Title });
+              setIsSiteAdmin(userData.d.IsSiteAdmin);
+              $.ajax({
+                url: `${_spPageContextInfo.webAbsoluteUrl}/_api/web/currentuser/groups`,
+                headers: { "Accept": "application/json; odata=verbose" },
+                xhrFields: { withCredentials: true },
+                success: (groupData) => {
+                  console.log('User groups (REST fallback):', groupData.d.results); // Debug
+                  const isOwnerGroup = groupData.d.results.some(g => g.Title.includes('Owners'));
+                  setUserRole(isSiteAdmin || isOwnerGroup ? 'owner' : 'member');
+                  setIsLoadingUser(false);
+                  loadSurveys();
+                },
+                error: (xhr, status, error) => {
+                  console.error('Error fetching groups (REST fallback):', { status, statusText: xhr.statusText, responseText: xhr.responseText });
+                  addNotification('Failed to load user groups.', 'error');
+                  setUserRole('member');
+                  setIsLoadingUser(false);
+                  loadSurveys();
+                }
+              });
+            },
+            error: (xhr, status, error) => {
+              console.error('Error loading user via REST API fallback:', { status, statusText: xhr.statusText, responseText: xhr.responseText });
+              addNotification('Failed to load user information.', 'error');
+              setIsLoadingUser(false);
+            }
+          });
         }
       );
     });
@@ -253,7 +342,7 @@ const App = () => {
                   key={survey.Id} 
                   survey={survey} 
                   userRole={userRole} 
-                  currentUserId={currentUser?.get_id()} 
+                  currentUserId={currentUser?.get_id ? currentUser.get_id() : currentUser?.Id} 
                   addNotification={addNotification} 
                   loadSurveys={loadSurveys}
                 />
@@ -288,7 +377,7 @@ const TopNav = ({ username, toggleSideNav }) => (
       <img src="/SiteAssets/logo.png" alt="Logo" className="h-8" />
       <h1 className="ml-4">Survey Manager</h1>
     </div>
-    <div className="text-right">{username}</div>
+    <div className="text-right">{username || 'Loading...'}</div>
   </nav>
 );
 
